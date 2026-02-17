@@ -124,6 +124,41 @@ pub async fn run(args: RunArgs) -> Result<()> {
         );
     }
 
+    // ── Codex sandbox preflight warnings ──────────────────────────────────────
+    if args.agent == "codex" {
+        let mut warnings = Vec::new();
+
+        // Check for uninstalled Node deps
+        if workdir.join("package.json").exists() && !workdir.join("node_modules").exists() {
+            warnings.push("package.json found but node_modules/ missing → run `npm install` first");
+        }
+
+        // Check for uninstalled Rust deps
+        if workdir.join("Cargo.toml").exists() {
+            if let Ok(home) = std::env::var("HOME") {
+                let registry = PathBuf::from(home).join(".cargo/registry");
+                if !registry.exists() {
+                    warnings.push("Cargo.toml found but cargo registry missing → run `cargo fetch` first");
+                }
+            }
+        }
+
+        // Check for uninstalled Python deps
+        if workdir.join("requirements.txt").exists() && !workdir.join(".venv").exists() && !workdir.join("venv").exists() {
+            warnings.push("requirements.txt found but no venv/ → run `pip install -r requirements.txt` in a venv first");
+        }
+
+        if !warnings.is_empty() {
+            eprintln!();
+            eprintln!("⚠️  Codex runs in a sandbox with NO network access.");
+            eprintln!("   Dependencies must be pre-installed or Codex will fail.");
+            for w in &warnings {
+                eprintln!("   • {w}");
+            }
+            eprintln!();
+        }
+    }
+
     // ── Write lock file ───────────────────────────────────────────────────────
     let run_started_at = Utc::now();
     let lock = LockFile {
