@@ -119,7 +119,7 @@ pub async fn parse_and_print(args: ParseArgs) -> Result<()> {
 /// Agent ordering for fallback: try the requested agent first, then others.
 /// Agent ordering for fallback. Codex is first because Claude's --print mode
 /// requires ANTHROPIC_API_KEY (OAuth-only installs fail silently).
-const FALLBACK_ORDER: &[&str] = &["codex", "gemini", "claude", "opencode"];
+const FALLBACK_ORDER: &[&str] = &["codex", "gemini", "api", "claude", "opencode"];
 
 async fn run_agent(
     agent: &str,

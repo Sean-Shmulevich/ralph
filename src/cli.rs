@@ -99,6 +99,14 @@ pub struct RunArgs {
     #[arg(long)]
     pub notify: Option<String>,
 
+    /// Base URL for API agent (default: https://api.anthropic.com, or http://localhost:3456 for Max proxy)
+    #[arg(long)]
+    pub api_url: Option<String>,
+
+    /// API key for API agent (default: reads ANTHROPIC_API_KEY env var)
+    #[arg(long)]
+    pub api_key: Option<String>,
+
     // ── Internal fields set programmatically by `ralph watch` ─────────────────
     /// Name override for the state directory.
     /// If set, state lives in `.ralph-<state_name>/` instead of `.ralph/`.

@@ -1,8 +1,10 @@
+mod api;
 mod claude;
 mod codex;
 mod gemini;
 mod opencode;
 
+pub use api::ApiAgent;
 pub use claude::ClaudeAgent;
 pub use codex::CodexAgent;
 pub use gemini::GeminiAgent;
@@ -30,14 +32,20 @@ pub trait Agent: Send + Sync {
 }
 
 /// Build the concrete agent implementation for the given name.
-pub fn create_agent(name: &str, model: Option<String>) -> Result<Box<dyn Agent>> {
+pub fn create_agent(
+    name: &str,
+    model: Option<String>,
+    api_url: Option<String>,
+    api_key: Option<String>,
+) -> Result<Box<dyn Agent>> {
     match name {
         "claude" => Ok(Box::new(ClaudeAgent::new(model))),
         "gemini" => Ok(Box::new(GeminiAgent::new(model))),
         "codex" => Ok(Box::new(CodexAgent::new(model))),
         "opencode" => Ok(Box::new(OpenCodeAgent::new(model))),
+        "api" => Ok(Box::new(ApiAgent::new(api_url, api_key, model)?)),
         other => anyhow::bail!(
-            "Unknown agent '{}'. Supported agents: claude, gemini, codex, opencode",
+            "Unknown agent '{}'. Supported agents: claude, gemini, codex, opencode, api",
             other
         ),
     }

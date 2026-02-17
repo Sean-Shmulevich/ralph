@@ -78,7 +78,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     };
 
     let git = GitManager::new(&workdir);
-    let agent = create_agent(&args.agent, args.model.clone())?;
+    let agent = create_agent(&args.agent, args.model.clone(), args.api_url.clone(), args.api_key.clone())?;
 
     let is_watch_mode = args.state_name.is_some();
 
@@ -1185,6 +1185,8 @@ fi
             hook_url: None,
             hook_token: None,
             notify: None,
+            api_url: None,
+            api_key: None,
             state_name: None,
             loop_status: None,
             cancel_flag: None,
