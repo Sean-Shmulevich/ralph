@@ -197,11 +197,10 @@ async fn run_watcher(
 
 /// Return free disk space in bytes for the filesystem containing `path`.
 ///
-/// Uses `df --output=avail -B1 <path>` which works on Linux and macOS.
+/// Cross-platform: uses `df -k` (POSIX) and parses the "Available" column.
 pub async fn free_disk_bytes(path: &Path) -> Result<u64> {
     let output = tokio::process::Command::new("df")
-        .arg("--output=avail")
-        .arg("-B1")
+        .arg("-k") // 1K blocks, works on Linux + macOS + BSD
         .arg(path)
         .output()
         .await?;
@@ -211,16 +210,22 @@ pub async fn free_disk_bytes(path: &Path) -> Result<u64> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Output looks like:
-    //    Avail
-    // 12345678
-    let avail = stdout
+    // Output looks like (header + data line):
+    // Filesystem  1K-blocks  Used  Available  Use%  Mounted on
+    // /dev/sda1   500000000  ...   123456789  ...   /
+    //
+    // Available is typically column index 3 (0-indexed).
+    let avail_kb = stdout
         .lines()
         .nth(1)
-        .and_then(|l| l.trim().parse::<u64>().ok())
+        .and_then(|line| {
+            line.split_whitespace()
+                .nth(3)
+                .and_then(|s| s.parse::<u64>().ok())
+        })
         .ok_or_else(|| anyhow::anyhow!("Failed to parse df output: {}", stdout))?;
 
-    Ok(avail)
+    Ok(avail_kb * 1024)
 }
 
 /// Return `true` if the git working tree contains unmerged files.
