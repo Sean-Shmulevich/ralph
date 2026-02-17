@@ -1,150 +1,211 @@
-# Ralph — Autonomous AI Agent Loop Orchestrator
+# Ralph — Autonomous AI Agent for Software Development
 
-> **Phase 1 MVP** — Core loop for a single PRD, Claude Code agent, git integration.
+[![crates.io](https://img.shields.io/crates/v/ralph-loop.svg)](https://crates.io/crates/ralph-loop)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Ralph reads a PRD (Product Requirements Document), extracts a prioritised task list with an AI agent, then runs an isolated agent loop — one task at a time, each in a fresh process — until the whole PRD is implemented or a circuit-breaker fires.
+Ralph is an autonomous AI agent that reads a PRD, extracts tasks, and implements them iteratively until completion.
+
+---
+
+## Installation
+
+### From crates.io
+
+Install Ralph directly from crates.io:
+
+```bash
+cargo install ralph-loop
+```
+
+### Build from source
+
+Requires Rust 1.70+ and `git`.
+
+1.  Clone the repository:
+    ```bash
+    git clone https://github.com/openclaw/ralph.git
+    cd ralph
+    ```
+2.  Build the project:
+    ```bash
+    cargo build --release
+    ```
+3.  Add the executable to your PATH:
+    ```bash
+    cp target/release/ralph ~/.local/bin/
+    ```
+    (Ensure `~/.local/bin` is in your system's PATH environment variable).
 
 ---
 
 ## Quick Start
 
-```bash
-# Build
-cargo build --release
-cp target/release/ralph ~/.local/bin/
+Go from a PRD to implemented code in three easy steps:
 
-# Parse a PRD and preview tasks (no code changes)
-ralph parse my-feature.md
+1.  **Create your PRD:** Start with a `prd.md` file defining your project.
+    ```bash
+    ralph init
+    # Edit prd.md with your project details
+    ```
 
-# Run the full loop
-ralph run my-feature.md
+2.  **Parse and preview tasks:** See what tasks Ralph extracts without making any changes.
+    ```bash
+    ralph parse prd.md
+    ```
 
-# Run with explicit agent/model, verbose output, 5-minute timeout
-ralph run my-feature.md --agent claude --model claude-opus-4-5 --timeout 300 --verbose
-```
+3.  **Run the autonomous loop:** Let Ralph implement the tasks.
+    ```bash
+    ralph run prd.md
+    ```
 
 ---
 
-## Commands
+## CLI Reference
 
-### `ralph run <prd.md>`
+### `ralph init`
 
-Run an agent loop for a single PRD.
+Initializes a new `prd.md` template in the current directory. If `prd.md` already exists, it will abort.
+
+### `ralph parse <PRD_FILE>`
+
+Parses a Product Requirements Document (PRD) and prints the extracted task list. This command does not modify any code.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--agent` | `claude` | Agent backend to use |
-| `--model MODEL` | agent default | Model override |
-| `--max-iterations N` | `20` | Hard cap on iterations |
-| `--timeout SECS` | `600` | Per-iteration wall-clock timeout |
-| `--max-failures N` | `3` | Consecutive failures before stopping |
-| `--workdir DIR` | `.` | Project root |
-| `--branch NAME` | auto | Git branch name |
-| `--no-branch` | — | Skip branch creation and auto-commit |
-| `--verbose` | — | Stream agent output to terminal |
-| `--dry-run` | — | Parse PRD, print tasks, exit |
+| `--output FILE` | `stdout` | Write tasks.json to this path |
 
-### `ralph parse <prd.md>`
+### `ralph run <PRD_FILE>`
 
-Parse a PRD and print the task list without running any agent iterations.
+Runs the autonomous agent loop to implement tasks from the specified PRD.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--output FILE` | stdout | Write tasks.json to this path |
+| `--agent` | `claude` | Agent backend to use (e.g., `claude`, `gemini`, `codex`, `opencode`) |
+| `--model MODEL` | agent default | Specific model override for the agent |
+| `--max-iterations N` | `20` | Hard cap on the number of agent iterations |
+| `--timeout SECS` | `600` | Per-iteration wall-clock timeout in seconds |
+| `--stall-timeout SECS` | `120` | Timeout for agent output silence in seconds (before next fallback) |
+| `--max-failures N` | `3` | Consecutive failures before stopping the loop |
+| `--workdir DIR` | `.` | Project root directory for Ralph to operate in |
+| `--branch NAME` | auto | Git branch name to create for the changes |
+| `--no-branch` | — | Skip branch creation and auto-commit operations |
+| `--verbose` | — | Stream agent output to the terminal for debugging |
+| `--dry-run` | — | Parse PRD, print tasks, and exit without running the loop |
+| `--parse-timeout` | `120` | Timeout for the PRD parsing phase in seconds |
+
+### `ralph doctor`
+
+Checks the local environment for common issues and dependencies required by Ralph.
+
+Outputs a summary table including:
+-   **Agents installed**: Checks for `claude`, `codex`, `gemini`, `opencode` in PATH.
+-   **Agents authenticated**: Attempts a quick probe to verify authentication for found agents.
+-   **Git status**: Verifies Git installation and if the current directory is a Git repository.
+-   **Disk space**: Reports available disk space.
 
 ---
 
-## How It Works
+## Agent Setup Guides
 
-```
-ralph run prd.md
-  │
-  ├─ Parse PRD → .ralph/tasks.json   (via claude)
-  │
-  └─ Loop:
-       ├─ Pick highest-priority pending task (deps satisfied)
-       ├─ Build prompt (task + PRD + progress log)
-       ├─ Spawn claude --dangerously-skip-permissions --print -p "…"
-       ├─ Wait with hard timeout (kill on expiry)
-       ├─ Capture stdout+stderr → .ralph/logs/iteration-N-TID.log
-       ├─ Detect completion: <promise>COMPLETE</promise> in stdout
-       ├─ Update .ralph/tasks.json (atomic write)
-       ├─ Append .ralph/progress.md
-       ├─ Git commit if changes exist
-       └─ Repeat until all done or circuit-breaker fires
-```
+Ralph supports multiple AI agents. Here's how to set them up:
 
-### Completion Detection
+### Claude
 
-Each iteration's stdout is scanned for:
+Ralph interfaces with Claude via the Anthropic `claude` CLI.
 
-```
-<promise>COMPLETE</promise>
-```
+1.  **Install the Claude CLI:**
+    ```bash
+    pip install anthropic-cli
+    ```
+2.  **Set your API key:**
+    Ensure your Anthropic API key is set as an environment variable:
+    ```bash
+    export ANTHROPIC_API_KEY="sk-..."
+    ```
+    Alternatively, configure it using the Anthropic CLI directly.
 
-The agent is instructed to output this token **only** when the task is genuinely done.  
-As a secondary signal, Ralph also checks whether `.ralph/tasks.json` was modified by the agent itself.
+### Gemini
 
-### Circuit Breaker
+Ralph interfaces with Gemini via the Google `gemini` CLI.
 
-If the agent fails to complete a task `--max-failures` times in a row, Ralph stops and records the state. Re-run `ralph run prd.md` to resume — existing `tasks.json` is loaded automatically.
+1.  **Install the Gemini CLI:**
+    ```bash
+    npm install -g @google/gemini-cli
+    ```
+    (Requires Node.js and npm)
+2.  **Authenticate:**
+    Run the authentication command:
+    ```bash
+    gemini auth login
+    ```
+    Follow the prompts to authenticate with your Google account.
 
----
+### Codex (OpenAI compatible)
 
-## State Directory: `.ralph/`
+Ralph can use any OpenAI-compatible API, often referred to as "Codex" in some contexts. This typically involves setting an API key.
 
-```
-.ralph/
-├── tasks.json          # Task list (authoritative source of truth)
-├── progress.md         # Append-only log of each iteration's outcome
-└── logs/
-    ├── iteration-1-T1.log
-    ├── iteration-2-T2.log
-    └── …
-```
+1.  **Set your API key:**
+    ```bash
+    export OPENAI_API_KEY="sk-..."
+    ```
+    Ensure the `openai` CLI is available in your PATH if you intend to use it directly, though Ralph only requires the environment variable.
 
-`tasks.json` is written atomically (temp file → rename) to survive crashes.
+### OpenCode (Local/Open-source models)
 
----
+For local or open-source models, Ralph expects an executable named `opencode` in your PATH that accepts similar `--print -p "..."` arguments.
 
-## Agents
-
-| Agent | Status | Command |
-|-------|--------|---------|
-| `claude` | ✅ Phase 1 | `claude --dangerously-skip-permissions --print -p "…"` |
-| `gemini` | 🔜 Phase 2 | `gemini -p "…"` |
-| `codex`  | 🔜 Phase 2 | `codex --quiet --approval-mode full-auto -p "…"` |
+Set up your preferred local model (e.g., Llama, Code Llama, GPT4All) to be accessible via an `opencode` wrapper script that conforms to this interface.
 
 ---
 
-## Git Integration
+## Webhook Hooks
 
-Ralph automatically:
-1. Creates branch `ralph/<prd-stem>` (or `--branch NAME`) before the first iteration
-2. `git add -A && git commit -m "feat: TN — <title> (ralph)"` after each completed task
+Ralph can dispatch events to a configurable webhook URL for real-time monitoring or integration with other systems.
 
-Pass `--no-branch` to skip all git operations.
+To enable webhooks, add a `[hooks]` section to your `ralph.toml` configuration file:
 
----
+```toml
+[hooks]
+url = "https://your-webhook-url.com/endpoint"
+token = "your-optional-secret-token" # Used in an 'X-Webhook-Token' header
+```
 
-## Phases
-
-- **Phase 1** (this) — single PRD loop, Claude Code, git, state
-- **Phase 2** — Gemini + Codex agents, stall detection, `ralph status`
-- **Phase 3** — parallel PRDs (`ralph watch`), ratatui TUI, `ralph logs --follow`
-- **Phase 4** — config file, heuristic parser, crates.io publish
+Ralph will send `POST` requests to the specified `url` with a JSON payload containing details about each significant event (e.g., task started, task completed, iteration failed). If a `token` is provided, it will be included in the `X-Webhook-Token` header for verification by your webhook receiver.
 
 ---
 
-## Known Limitations (Phase 1)
+## Configuration File (`ralph.toml`)
 
-- Only Claude Code agent is supported
-- No stall detection (output-silence timeout) — comes in Phase 2
-- No `ralph status`/`ralph stop` — subprocess is blocking; Ctrl-C will terminate it
-- On timeout, the child process is SIGKILL'd but its grandchildren (sub-shells, compilers) may linger briefly
+Ralph can be configured using a `ralph.toml` file. It looks for this file in the current directory first, then in `~/.config/ralph/config.toml`. CLI flags always override configuration file values, which in turn override built-in defaults.
+
+Example `ralph.toml`:
+
+```toml
+# ralph.toml
+[defaults]
+agent = "gemini"            # Default agent to use if not specified by CLI
+max_iterations = 20         # Maximum number of agent iterations
+timeout = 600               # Per-iteration timeout in seconds
+stall_timeout = 120         # Agent output silence timeout in seconds
+max_failures = 3            # Consecutive failures before stopping
+
+[hooks]
+url = "https://your-webhook-url.com/endpoint"
+token = "your-optional-secret-token"
+```
+
+A full list of configurable options matches the `ralph run` command-line arguments where applicable.
+
+---
+
+## Contributing
+
+Ralph is an open-source project. We welcome contributions! Please see our `CONTRIBUTING.md` file for details on how to set up your development environment, run tests, and submit pull requests.
 
 ---
 
 ## License
 
-MIT
+Ralph is licensed under the MIT License.
+
+Copyright (c) 2026 Sean Shmulevich

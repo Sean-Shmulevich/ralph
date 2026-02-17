@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod git;
 mod hooks;
+mod notify;
 mod logs;
 mod orchestrator;
 mod parser;

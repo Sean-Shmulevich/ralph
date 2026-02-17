@@ -249,6 +249,7 @@ fn build_run_args(
         dry_run: false,
         hook_url: watch_args.hook_url.clone(),
         hook_token: watch_args.hook_token.clone(),
+        notify: watch_args.notify.clone(),
         state_name: Some(slug.to_string()),
         loop_status: Some(loop_status),
         cancel_flag: Some(cancel_flag.clone()),

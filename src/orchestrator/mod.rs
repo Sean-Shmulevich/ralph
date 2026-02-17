@@ -12,6 +12,7 @@ use crate::agents::{create_agent, Agent};
 use crate::cli::RunArgs;
 use crate::git::GitManager;
 use crate::hooks::{self, HookConfig, HookEvent, Progress};
+use crate::notify::{self, NotifyConfig};
 use crate::parser::parse_prd;
 use crate::state::{
     LockFile, LoopState, SharedLoopStatus, StateManager, Task, TaskList, TaskStatus,
@@ -86,6 +87,20 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .hook_url
         .as_ref()
         .map(|url| HookConfig::new(url.clone(), args.hook_token.clone()));
+
+    // Set up OpenClaw notify if configured
+    let notify = args.notify.as_ref().and_then(|flag| {
+        let prd_name = prd_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let cfg = NotifyConfig::from_env(flag, &prd_name);
+        if cfg.is_none() {
+            eprintln!("⚠️  --notify requires OPENCLAW_HOOKS_TOKEN env var");
+        }
+        cfg
+    });
 
     if !is_watch_mode {
         // Interactive `ralph run` — print startup banner
@@ -248,10 +263,12 @@ pub async fn run(args: RunArgs) -> Result<()> {
             }
             fire_hook(
                 &hook,
+                &notify,
                 HookEvent::MaxIterations {
                     max_iterations: args.max_iterations,
                     progress: make_progress(&task_list),
                 },
+                None,
             )
             .await;
             update_loop_state(&args.loop_status, LoopState::Stopped);
@@ -271,11 +288,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
             ))?;
             fire_hook(
                 &hook,
+                &notify,
                 HookEvent::CircuitBreaker {
                     consecutive_failures,
                     last_error: "Too many consecutive failures".to_string(),
                     progress: make_progress(&task_list),
                 },
+                None,
             )
             .await;
             update_loop_state(
@@ -305,6 +324,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 state.append_progress("**COMPLETE** — all tasks finished successfully.")?;
                 fire_hook(
                     &hook,
+                    &notify,
                     HookEvent::AllComplete {
                         total_tasks: task_list.tasks.len() as u32,
                         total_iterations: iteration - 1,
@@ -316,6 +336,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         ),
                         progress: make_progress(&task_list),
                     },
+                    None,
                 )
                 .await;
                 update_loop_state(&args.loop_status, LoopState::Complete);
@@ -457,6 +478,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     // Fire webhook
                     fire_hook(
                         &hook,
+                        &notify,
                         HookEvent::TaskComplete {
                             task_id: task.id.clone(),
                             task_title: task.title.clone(),
@@ -469,6 +491,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                             ),
                             progress: make_progress(&task_list),
                         },
+                        None,
                     )
                     .await;
 
@@ -521,6 +544,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
                     fire_hook(
                         &hook,
+                        &notify,
                         HookEvent::TaskFailed {
                             task_id: task.id.clone(),
                             task_title: task.title.clone(),
@@ -530,6 +554,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                             consecutive_failures,
                             progress: make_progress(&task_list),
                         },
+                        None,
                     )
                     .await;
                 }
@@ -553,6 +578,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
                 fire_hook(
                     &hook,
+                    &notify,
                     HookEvent::TaskFailed {
                         task_id: task.id.clone(),
                         task_title: task.title.clone(),
@@ -562,6 +588,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         consecutive_failures,
                         progress: make_progress(&task_list),
                     },
+                    None,
                 )
                 .await;
             }
@@ -599,9 +626,17 @@ fn make_progress(task_list: &TaskList) -> Progress {
     }
 }
 
-async fn fire_hook(hook: &Option<HookConfig>, event: HookEvent) {
+async fn fire_hook(
+    hook: &Option<HookConfig>,
+    notify_cfg: &Option<NotifyConfig>,
+    event: HookEvent,
+    log_path: Option<&Path>,
+) {
     if let Some(ref config) = hook {
         hooks::send_hook(config, &event).await;
+    }
+    if let Some(ref config) = notify_cfg {
+        notify::send_notify(config, &event, log_path).await;
     }
 }
 
@@ -1149,6 +1184,7 @@ fi
             dry_run: false,
             hook_url: None,
             hook_token: None,
+            notify: None,
             state_name: None,
             loop_status: None,
             cancel_flag: None,

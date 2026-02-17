@@ -94,6 +94,11 @@ pub struct RunArgs {
     #[arg(long)]
     pub hook_token: Option<String>,
 
+    /// Send progress notifications to OpenClaw channel (e.g. discord:CHANNEL_ID)
+    /// Requires OPENCLAW_HOOKS_TOKEN env var.
+    #[arg(long)]
+    pub notify: Option<String>,
+
     // ── Internal fields set programmatically by `ralph watch` ─────────────────
     /// Name override for the state directory.
     /// If set, state lives in `.ralph-<state_name>/` instead of `.ralph/`.
@@ -187,6 +192,10 @@ pub struct WatchArgs {
     /// Bearer token for webhook authentication
     #[arg(long)]
     pub hook_token: Option<String>,
+
+    /// Send progress notifications to OpenClaw channel (e.g. discord:CHANNEL_ID)
+    #[arg(long)]
+    pub notify: Option<String>,
 
     /// Stream agent output to terminal (only useful with --no-tui)
     #[arg(long, short)]
