@@ -113,7 +113,62 @@ pub async fn parse_and_print(args: ParseArgs) -> Result<()> {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
+/// Agent ordering for fallback: try the requested agent first, then others.
+const FALLBACK_ORDER: &[&str] = &["claude", "codex", "gemini", "opencode"];
+
 async fn run_agent(agent: &str, model: Option<&str>, prompt: &str) -> Result<String> {
+    // Try the requested agent first
+    match try_agent(agent, model, prompt).await {
+        Ok(output) => return Ok(output),
+        Err(e) => {
+            eprintln!("⚠️  {} failed: {}", agent, e);
+            eprintln!("    Trying fallback agents…");
+        }
+    }
+
+    // Try fallback agents
+    for fallback in FALLBACK_ORDER {
+        if *fallback == agent {
+            continue; // already tried
+        }
+        if !agent_on_path(fallback) {
+            continue; // not installed
+        }
+        eprintln!("🔄  Trying {} as fallback…", fallback);
+        match try_agent(fallback, model, prompt).await {
+            Ok(output) => return Ok(output),
+            Err(e) => {
+                eprintln!("⚠️  {} also failed: {}", fallback, e);
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "All agents failed for PRD parsing. Tried: {} + fallbacks.\n\
+         Make sure at least one agent is installed and authenticated.\n\
+         Tip: run your agent standalone first (e.g. `claude --print -p \"hello\"`) to verify it works.",
+        agent
+    )
+}
+
+fn agent_on_path(name: &str) -> bool {
+    let bin = match name {
+        "claude" => "claude",
+        "codex" => "codex",
+        "gemini" => "gemini",
+        "opencode" => "opencode",
+        _ => return false,
+    };
+    std::process::Command::new("which")
+        .arg(bin)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn build_agent_command(agent: &str, model: Option<&str>, prompt: &str) -> Result<Command> {
     let mut cmd = match agent {
         "claude" => {
             let mut c = Command::new("claude");
@@ -143,19 +198,32 @@ async fn run_agent(agent: &str, model: Option<&str>, prompt: &str) -> Result<Str
             c.arg(prompt);
             c
         }
+        "opencode" => {
+            let mut c = Command::new("opencode");
+            c.arg("run");
+            if let Some(m) = model {
+                c.arg("--model").arg(m);
+            }
+            c.arg(prompt);
+            c
+        }
         other => anyhow::bail!("Unknown agent for parsing: {}", other),
     };
-
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    Ok(cmd)
+}
+
+async fn try_agent(agent: &str, model: Option<&str>, prompt: &str) -> Result<String> {
+    let mut cmd = build_agent_command(agent, model, prompt)?;
 
     let output = cmd
         .output()
         .await
-        .context("Failed to spawn agent for PRD parsing")?;
+        .with_context(|| format!("Failed to spawn {} — is it installed?", agent))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Agent failed during PRD parsing:\n{}", stderr.trim());
+        anyhow::bail!("{}", stderr.trim());
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
