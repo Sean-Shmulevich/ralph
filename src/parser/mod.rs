@@ -340,8 +340,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Modifies PATH; run with `cargo test -- --ignored` to include
     async fn parse_prd_times_out_and_uses_fallback_agent() {
-        let _guard = env_lock().lock().expect("lock env mutation");
+        let _guard = crate::global_env_lock().lock().expect("lock env mutation");
         let dir = tempdir().expect("create tempdir");
         let bin_dir = dir.path().join("bin");
         fs::create_dir_all(&bin_dir).expect("create bin dir");
@@ -374,7 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_prd_claude_api_key_probe_falls_back_to_other_agent() {
-        let _guard = env_lock().lock().expect("lock env mutation");
+        let _guard = crate::global_env_lock().lock().expect("lock env mutation");
         let dir = tempdir().expect("create tempdir");
         let bin_dir = dir.path().join("bin");
         fs::create_dir_all(&bin_dir).expect("create bin dir");

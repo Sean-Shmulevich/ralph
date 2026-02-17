@@ -319,6 +319,7 @@ impl StateManager {
     }
 
     /// Read the lock file, if it exists.
+    #[allow(dead_code)]
     pub fn read_lock(&self) -> Result<Option<LockFile>> {
         if !self.lock_file.exists() {
             return Ok(None);

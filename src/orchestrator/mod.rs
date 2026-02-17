@@ -631,6 +631,7 @@ fn log_to_status(ls: &Option<SharedLoopStatus>, line: String) {
 ///
 /// Stdout and stderr are read concurrently on separate tokio tasks so neither
 /// pipe fills its kernel buffer and deadlocks the process.
+#[allow(clippy::too_many_arguments)]
 async fn run_iteration(
     agent: &dyn Agent,
     prompt: &str,
@@ -1156,7 +1157,7 @@ fi
 
     #[tokio::test]
     async fn single_iteration_marks_task_complete_and_updates_progress() {
-        let _guard = env_lock().lock().expect("lock env mutation");
+        let _guard = crate::global_env_lock().lock().expect("lock env mutation");
         let dir = tempdir().expect("create tempdir");
         let prd_path = dir.path().join("prd.md");
         fs::write(&prd_path, "# PRD").expect("write prd");
@@ -1202,7 +1203,7 @@ fi
 
     #[tokio::test]
     async fn three_consecutive_incomplete_iterations_trigger_circuit_breaker() {
-        let _guard = env_lock().lock().expect("lock env mutation");
+        let _guard = crate::global_env_lock().lock().expect("lock env mutation");
         let dir = tempdir().expect("create tempdir");
         let prd_path = dir.path().join("prd.md");
         fs::write(&prd_path, "# PRD").expect("write prd");
@@ -1263,7 +1264,7 @@ fi
 
     #[tokio::test]
     async fn all_tasks_complete_exits_early_without_iteration() {
-        let _guard = env_lock().lock().expect("lock env mutation");
+        let _guard = crate::global_env_lock().lock().expect("lock env mutation");
         let dir = tempdir().expect("create tempdir");
         let prd_path = dir.path().join("prd.md");
         fs::write(&prd_path, "# PRD").expect("write prd");
@@ -1305,7 +1306,7 @@ fi
 
     #[tokio::test]
     async fn complete_and_in_progress_tasks_do_not_exit_early() {
-        let _guard = env_lock().lock().expect("lock env mutation");
+        let _guard = crate::global_env_lock().lock().expect("lock env mutation");
         let dir = tempdir().expect("create tempdir");
         let prd_path = dir.path().join("prd.md");
         fs::write(&prd_path, "# PRD").expect("write prd");
@@ -1371,7 +1372,7 @@ fi
 
     #[tokio::test]
     async fn lock_file_is_written_with_pid_and_removed_on_clean_exit() {
-        let _guard = env_lock().lock().expect("lock env mutation");
+        let _guard = crate::global_env_lock().lock().expect("lock env mutation");
         let dir = tempdir().expect("create tempdir");
         let prd_path = dir.path().join("prd.md");
         fs::write(&prd_path, "# PRD").expect("write prd");
