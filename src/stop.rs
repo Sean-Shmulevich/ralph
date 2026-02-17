@@ -174,3 +174,71 @@ async fn find_all_lock_files(workdir: &Path) -> Result<Vec<PathBuf>> {
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    fn sample_lock(pid: u32) -> LockFile {
+        LockFile {
+            pid,
+            current_task: "T8 — Lock tests".to_string(),
+            progress: "0/1 done".to_string(),
+            started_at: Utc::now(),
+            prd_path: "tests/PRD.md".to_string(),
+            agent: "codex".to_string(),
+        }
+    }
+
+    #[test]
+    fn stale_lock_is_detected_and_removed() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let stale_pid = (50_000u32..55_000u32)
+            .find(|pid| !is_pid_alive(*pid))
+            .expect("find an unused pid");
+        let lock = sample_lock(stale_pid);
+        state.write_lock(&lock).expect("write stale lock");
+        assert!(state.lock_file.exists(), "lock file should exist before cleanup");
+
+        send_sigterm_to_lock(&lock, &state.lock_file).expect("handle stale lock");
+
+        assert!(
+            !state.lock_file.exists(),
+            "stale lock should be removed when PID is dead"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_all_lock_files_includes_named_watch_state_dirs() {
+        let dir = tempdir().expect("create tempdir");
+        let default_state = StateManager::new(dir.path()).expect("create default state");
+        let alpha_state = StateManager::new_named(dir.path(), "alpha").expect("create alpha state");
+        let beta_state = StateManager::new_named(dir.path(), "beta").expect("create beta state");
+        let ignored_dir = dir.path().join(".ralphx");
+        std::fs::create_dir_all(&ignored_dir).expect("create ignored dir");
+        std::fs::write(ignored_dir.join("lock"), "not a ralph state").expect("write ignored lock");
+
+        default_state
+            .write_lock(&sample_lock(123))
+            .expect("write default lock");
+        alpha_state
+            .write_lock(&sample_lock(456))
+            .expect("write alpha lock");
+        beta_state
+            .write_lock(&sample_lock(789))
+            .expect("write beta lock");
+
+        let mut locks = find_all_lock_files(dir.path())
+            .await
+            .expect("find all lock files");
+        locks.sort();
+
+        assert_eq!(locks.len(), 3);
+        assert!(locks.contains(&default_state.lock_file));
+        assert!(locks.contains(&alpha_state.lock_file));
+        assert!(locks.contains(&beta_state.lock_file));
+    }
+}

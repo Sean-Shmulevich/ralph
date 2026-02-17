@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -227,8 +227,14 @@ impl StateManager {
 
         let list: TaskList =
             serde_json::from_str(&content).context("Failed to parse .ralph/tasks.json")?;
+        validate_task_list(&list).context("Invalid .ralph/tasks.json")?;
 
         Ok(Some(list))
+    }
+
+    /// Read tasks.json if it exists.
+    pub fn read_tasks(&self) -> Result<Option<TaskList>> {
+        self.load_tasks()
     }
 
     /// Atomically write tasks.json (write to tmp → fsync → rename).
@@ -247,6 +253,47 @@ impl StateManager {
             .map_err(|e| anyhow::anyhow!("Failed to atomically replace tasks.json: {}", e))?;
 
         Ok(())
+    }
+
+    /// Atomically write tasks.json.
+    pub fn write_tasks(&self, tasks: &TaskList) -> Result<()> {
+        self.save_tasks(tasks)
+    }
+
+    /// Return the highest-priority pending task whose dependencies are complete.
+    pub fn pick_next_task<'a>(&self, task_list: &'a TaskList) -> Option<&'a Task> {
+        let complete_ids: HashSet<&str> = task_list
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Complete)
+            .map(|t| t.id.as_str())
+            .collect();
+
+        task_list
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Pending)
+            .filter(|t| t.depends_on.iter().all(|dep| complete_ids.contains(dep.as_str())))
+            .min_by_key(|t| t.priority)
+    }
+
+    /// Mark one task complete and persist tasks.json.
+    pub fn mark_complete(&self, task_id: &str) -> Result<()> {
+        let mut list = self
+            .load_tasks()?
+            .ok_or_else(|| anyhow::anyhow!("tasks.json does not exist"))?;
+
+        let task = list
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == task_id)
+            .ok_or_else(|| anyhow::anyhow!("task not found: {}", task_id))?;
+
+        task.status = TaskStatus::Complete;
+        task.completed_at = Some(Utc::now());
+        list.updated_at = Utc::now();
+
+        self.save_tasks(&list)
     }
 
     // ── Lock file ─────────────────────────────────────────────────────────────
@@ -300,5 +347,414 @@ impl StateManager {
             .context("Failed to write to progress.md")?;
 
         Ok(())
+    }
+}
+
+fn validate_task_list(task_list: &TaskList) -> Result<()> {
+    let mut seen_ids = HashSet::new();
+    for task in &task_list.tasks {
+        if !seen_ids.insert(task.id.as_str()) {
+            anyhow::bail!("Duplicate task id detected: {}", task.id);
+        }
+    }
+
+    let mut indegree: HashMap<&str, usize> = HashMap::new();
+    let mut outgoing: HashMap<&str, Vec<&str>> = HashMap::new();
+    for task in &task_list.tasks {
+        indegree.insert(task.id.as_str(), task.depends_on.len());
+    }
+
+    for task in &task_list.tasks {
+        for dep in &task.depends_on {
+            if !indegree.contains_key(dep.as_str()) {
+                anyhow::bail!("Task '{}' depends on unknown task '{}'", task.id, dep);
+            }
+            outgoing
+                .entry(dep.as_str())
+                .or_default()
+                .push(task.id.as_str());
+        }
+    }
+
+    let mut queue: VecDeque<&str> = indegree
+        .iter()
+        .filter_map(|(id, degree)| (*degree == 0).then_some(*id))
+        .collect();
+    let mut visited = 0usize;
+
+    while let Some(id) = queue.pop_front() {
+        visited += 1;
+        if let Some(dependents) = outgoing.get(id) {
+            for dependent in dependents {
+                if let Some(entry) = indegree.get_mut(dependent) {
+                    *entry -= 1;
+                    if *entry == 0 {
+                        queue.push_back(dependent);
+                    }
+                }
+            }
+        }
+    }
+
+    if visited != task_list.tasks.len() {
+        anyhow::bail!("Circular task dependencies detected in tasks.json");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn sample_task_list() -> TaskList {
+        let now = Utc::now();
+        TaskList {
+            version: 1,
+            prd_path: "tests/PRD.md".to_string(),
+            created_at: now,
+            updated_at: now,
+            tasks: vec![
+                Task {
+                    id: "T1".to_string(),
+                    title: "First".to_string(),
+                    description: "first task".to_string(),
+                    priority: 2,
+                    status: TaskStatus::Pending,
+                    depends_on: vec![],
+                    completed_at: None,
+                    notes: Some("note-1".to_string()),
+                },
+                Task {
+                    id: "T2".to_string(),
+                    title: "Second".to_string(),
+                    description: "second task".to_string(),
+                    priority: 1,
+                    status: TaskStatus::Pending,
+                    depends_on: vec![],
+                    completed_at: None,
+                    notes: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn state_manager_new_creates_ralph_directory_tree() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+
+        assert!(state.ralph_dir.exists());
+        assert!(state.ralph_dir.is_dir());
+        assert!(state.logs_dir.exists());
+        assert!(state.logs_dir.is_dir());
+    }
+
+    #[test]
+    fn write_and_read_tasks_roundtrip_preserves_fields() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let original = sample_task_list();
+
+        state.write_tasks(&original).expect("write tasks");
+        let loaded = state
+            .read_tasks()
+            .expect("read tasks")
+            .expect("tasks should exist");
+
+        assert_eq!(loaded.version, original.version);
+        assert_eq!(loaded.prd_path, original.prd_path);
+        assert_eq!(loaded.created_at, original.created_at);
+        assert_eq!(loaded.updated_at, original.updated_at);
+        assert_eq!(loaded.tasks.len(), original.tasks.len());
+
+        for (got, expected) in loaded.tasks.iter().zip(original.tasks.iter()) {
+            assert_eq!(got.id, expected.id);
+            assert_eq!(got.title, expected.title);
+            assert_eq!(got.description, expected.description);
+            assert_eq!(got.priority, expected.priority);
+            assert_eq!(got.status, expected.status);
+            assert_eq!(got.depends_on, expected.depends_on);
+            assert_eq!(got.completed_at, expected.completed_at);
+            assert_eq!(got.notes, expected.notes);
+        }
+    }
+
+    #[test]
+    fn write_tasks_failure_does_not_partially_overwrite_existing_file() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+
+        let mut original = sample_task_list();
+        original.tasks[0].title = "original".to_string();
+        state.write_tasks(&original).expect("initial write");
+
+        let before = fs::read_to_string(&state.tasks_file).expect("read baseline tasks file");
+
+        let mut replacement = sample_task_list();
+        replacement.tasks[0].title = "replacement".to_string();
+
+        let original_permissions = fs::metadata(&state.ralph_dir)
+            .expect("metadata")
+            .permissions();
+        let mut readonly_permissions = original_permissions.clone();
+        readonly_permissions.set_readonly(true);
+        fs::set_permissions(&state.ralph_dir, readonly_permissions).expect("set readonly");
+
+        let write_result = state.write_tasks(&replacement);
+
+        fs::set_permissions(&state.ralph_dir, original_permissions).expect("restore permissions");
+
+        assert!(write_result.is_err());
+
+        let after = fs::read_to_string(&state.tasks_file).expect("read tasks file after failure");
+        assert_eq!(after, before);
+
+        let loaded = state
+            .read_tasks()
+            .expect("read tasks")
+            .expect("tasks should exist");
+        assert_eq!(loaded.tasks[0].title, "original");
+    }
+
+    #[test]
+    fn pick_next_task_returns_highest_priority_pending_task() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let list = sample_task_list();
+
+        let picked = state.pick_next_task(&list).expect("task should be picked");
+        assert_eq!(picked.id, "T2");
+    }
+
+    #[test]
+    fn pick_next_task_respects_dependencies() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let now = Utc::now();
+        let list = TaskList {
+            version: 1,
+            prd_path: "tests/PRD.md".to_string(),
+            created_at: now,
+            updated_at: now,
+            tasks: vec![
+                Task {
+                    id: "A".to_string(),
+                    title: "blocked".to_string(),
+                    description: "blocked task".to_string(),
+                    priority: 1,
+                    status: TaskStatus::Pending,
+                    depends_on: vec!["B".to_string()],
+                    completed_at: None,
+                    notes: None,
+                },
+                Task {
+                    id: "B".to_string(),
+                    title: "dependency".to_string(),
+                    description: "dependency task".to_string(),
+                    priority: 2,
+                    status: TaskStatus::Pending,
+                    depends_on: vec![],
+                    completed_at: None,
+                    notes: None,
+                },
+            ],
+        };
+
+        let picked = state.pick_next_task(&list).expect("task should be picked");
+        assert_eq!(picked.id, "B");
+    }
+
+    #[test]
+    fn mark_complete_sets_status_and_persists() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let list = sample_task_list();
+        state.write_tasks(&list).expect("write initial tasks");
+
+        state.mark_complete("T1").expect("mark task complete");
+
+        let loaded = state
+            .read_tasks()
+            .expect("read tasks")
+            .expect("tasks should exist");
+        let task = loaded
+            .tasks
+            .iter()
+            .find(|t| t.id == "T1")
+            .expect("task should exist");
+        assert_eq!(task.status, TaskStatus::Complete);
+        assert!(task.completed_at.is_some());
+    }
+
+    #[test]
+    fn append_progress_appends_without_overwriting() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+
+        state.append_progress("entry one").expect("append first");
+        state.append_progress("entry two").expect("append second");
+
+        let content = fs::read_to_string(&state.progress_file).expect("read progress");
+        assert!(content.contains("entry one"));
+        assert!(content.contains("entry two"));
+        assert!(content.find("entry one").expect("first entry exists")
+            < content.find("entry two").expect("second entry exists"));
+    }
+
+    #[test]
+    fn valid_tasks_json_deserializes_correctly() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let json = r#"{
+  "version": 1,
+  "prd_path": "tests/PRD.md",
+  "created_at": "2026-02-17T11:25:50Z",
+  "updated_at": "2026-02-17T11:25:50Z",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Parse tasks",
+      "description": "Parse PRD output into tasks",
+      "priority": 1,
+      "status": "pending",
+      "depends_on": []
+    }
+  ]
+}"#;
+
+        fs::write(&state.tasks_file, json).expect("write tasks file");
+        let loaded = state
+            .read_tasks()
+            .expect("read tasks")
+            .expect("tasks should exist");
+
+        assert_eq!(loaded.tasks.len(), 1);
+        assert_eq!(loaded.tasks[0].id, "T1");
+    }
+
+    #[test]
+    fn missing_required_fields_produce_clear_error() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let json = r#"{
+  "version": 1,
+  "prd_path": "tests/PRD.md",
+  "created_at": "2026-02-17T11:25:50Z",
+  "updated_at": "2026-02-17T11:25:50Z",
+  "tasks": [
+    {
+      "id": "T1",
+      "description": "Missing title",
+      "priority": 1,
+      "status": "pending",
+      "depends_on": []
+    }
+  ]
+}"#;
+
+        fs::write(&state.tasks_file, json).expect("write tasks file");
+        let err = state.read_tasks().expect_err("missing title should fail");
+        let msg = format!("{:#}", err);
+
+        assert!(msg.contains("Failed to parse .ralph/tasks.json"));
+        assert!(msg.to_ascii_lowercase().contains("missing field"));
+        assert!(msg.contains("title"));
+    }
+
+    #[test]
+    fn empty_task_list_is_handled_gracefully() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let json = r#"{
+  "version": 1,
+  "prd_path": "tests/PRD.md",
+  "created_at": "2026-02-17T11:25:50Z",
+  "updated_at": "2026-02-17T11:25:50Z",
+  "tasks": []
+}"#;
+
+        fs::write(&state.tasks_file, json).expect("write tasks file");
+        let loaded = state
+            .read_tasks()
+            .expect("read tasks")
+            .expect("tasks should exist");
+
+        assert!(loaded.tasks.is_empty());
+        assert!(state.pick_next_task(&loaded).is_none());
+    }
+
+    #[test]
+    fn duplicate_task_ids_are_detected() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let json = r#"{
+  "version": 1,
+  "prd_path": "tests/PRD.md",
+  "created_at": "2026-02-17T11:25:50Z",
+  "updated_at": "2026-02-17T11:25:50Z",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "First",
+      "description": "first",
+      "priority": 1,
+      "status": "pending",
+      "depends_on": []
+    },
+    {
+      "id": "T1",
+      "title": "Second",
+      "description": "second",
+      "priority": 2,
+      "status": "pending",
+      "depends_on": []
+    }
+  ]
+}"#;
+
+        fs::write(&state.tasks_file, json).expect("write tasks file");
+        let err = state.read_tasks().expect_err("duplicate ids should fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.to_ascii_lowercase().contains("duplicate"));
+        assert!(msg.contains("T1"));
+    }
+
+    #[test]
+    fn circular_dependencies_are_detected() {
+        let dir = tempdir().expect("create tempdir");
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let json = r#"{
+  "version": 1,
+  "prd_path": "tests/PRD.md",
+  "created_at": "2026-02-17T11:25:50Z",
+  "updated_at": "2026-02-17T11:25:50Z",
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "First",
+      "description": "first",
+      "priority": 1,
+      "status": "pending",
+      "depends_on": ["T2"]
+    },
+    {
+      "id": "T2",
+      "title": "Second",
+      "description": "second",
+      "priority": 2,
+      "status": "pending",
+      "depends_on": ["T1"]
+    }
+  ]
+}"#;
+
+        fs::write(&state.tasks_file, json).expect("write tasks file");
+        let err = state
+            .read_tasks()
+            .expect_err("circular dependencies should fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.to_ascii_lowercase().contains("circular"));
     }
 }

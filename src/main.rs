@@ -171,3 +171,51 @@ async fn find_active_locks(workdir: &std::path::Path) -> Result<Vec<(PathBuf, st
     }
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    fn sample_lock(pid: u32) -> state::LockFile {
+        state::LockFile {
+            pid,
+            current_task: "T8 — Lock tests".to_string(),
+            progress: "0/2 done".to_string(),
+            started_at: Utc::now(),
+            prd_path: "tests/PRD.md".to_string(),
+            agent: "codex".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn find_active_locks_reads_default_and_named_state_directories() {
+        let dir = tempdir().expect("create tempdir");
+        let default_state = state::StateManager::new(dir.path()).expect("create default state");
+        let watch_a_state =
+            state::StateManager::new_named(dir.path(), "watch-a").expect("create watch-a state");
+        let watch_b_state =
+            state::StateManager::new_named(dir.path(), "watch-b").expect("create watch-b state");
+
+        default_state
+            .write_lock(&sample_lock(1001))
+            .expect("write default lock");
+        watch_a_state
+            .write_lock(&sample_lock(1002))
+            .expect("write watch-a lock");
+        watch_b_state
+            .write_lock(&sample_lock(1003))
+            .expect("write watch-b lock");
+
+        let locks = find_active_locks(dir.path())
+            .await
+            .expect("find active locks");
+        let lock_paths: Vec<_> = locks.into_iter().map(|(path, _)| path).collect();
+
+        assert_eq!(lock_paths.len(), 3);
+        assert!(lock_paths.contains(&default_state.lock_file));
+        assert!(lock_paths.contains(&watch_a_state.lock_file));
+        assert!(lock_paths.contains(&watch_b_state.lock_file));
+    }
+}

@@ -720,3 +720,441 @@ fn print_task_table(task_list: &TaskList) {
         println!("     {}", t.description);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::AgentProcess;
+    use crate::cli::RunArgs;
+    use crate::state::StateManager;
+    use chrono::Utc;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::process::Stdio;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir;
+    use tokio::process::Command;
+    use tokio::time::Instant;
+
+    struct MockAgent {
+        program: String,
+        args: Vec<String>,
+    }
+
+    impl MockAgent {
+        fn new(program: &str, args: &[&str]) -> Self {
+            Self {
+                program: program.to_string(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+            }
+        }
+    }
+
+    impl Agent for MockAgent {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn spawn(&self, _prompt: &str, workdir: &Path) -> Result<AgentProcess> {
+            let mut cmd = Command::new(&self.program);
+            cmd.args(&self.args)
+                .current_dir(workdir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+
+            let child = cmd.spawn().context("Failed to spawn mock agent process")?;
+            Ok(AgentProcess { child })
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_agent_echo_stdout_is_captured() {
+        let dir = tempdir().expect("create tempdir");
+        let log_path = dir.path().join("iteration.log");
+        let agent = MockAgent::new("echo", &["hello"]);
+
+        let stdout = run_iteration(
+            &agent,
+            "prompt",
+            dir.path(),
+            &log_path,
+            5,
+            5,
+            false,
+            None,
+        )
+        .await
+        .expect("run iteration");
+
+        assert_eq!(stdout.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn captures_stderr_separately_from_stdout() {
+        let dir = tempdir().expect("create tempdir");
+        let log_path = dir.path().join("iteration.log");
+        let agent = MockAgent::new("sh", &["-c", "echo out; echo err >&2"]);
+
+        let stdout = run_iteration(
+            &agent,
+            "prompt",
+            dir.path(),
+            &log_path,
+            5,
+            5,
+            false,
+            None,
+        )
+        .await
+        .expect("run iteration");
+
+        assert!(stdout.contains("out"));
+        assert!(!stdout.contains("err"));
+
+        let log = tokio::fs::read_to_string(&log_path)
+            .await
+            .expect("read iteration log");
+        assert!(log.contains("=== STDOUT ===\nout"));
+        assert!(log.contains("=== STDERR ===\nerr"));
+    }
+
+    #[tokio::test]
+    async fn hard_timeout_kills_agent_process() {
+        let dir = tempdir().expect("create tempdir");
+        let log_path = dir.path().join("iteration.log");
+        let agent = MockAgent::new("sh", &["-c", "sleep 10"]);
+        let started = Instant::now();
+
+        let err = run_iteration(
+            &agent,
+            "prompt",
+            dir.path(),
+            &log_path,
+            1,
+            60,
+            false,
+            None,
+        )
+        .await
+        .expect_err("iteration should time out");
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "timeout should kill quickly, elapsed={elapsed:?}"
+        );
+        assert!(
+            err.to_string().contains("Agent timed out after 1s"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detects_completion_signal_in_captured_output() {
+        let dir = tempdir().expect("create tempdir");
+        std::fs::write(
+            dir.path().join("response.txt"),
+            "work done\n<promise>COMPLETE</promise>\n",
+        )
+        .expect("write response file");
+
+        let log_path = dir.path().join("iteration.log");
+        let agent = MockAgent::new("cat", &["response.txt"]);
+
+        let stdout = run_iteration(
+            &agent,
+            "prompt",
+            dir.path(),
+            &log_path,
+            5,
+            5,
+            false,
+            None,
+        )
+        .await
+        .expect("run iteration");
+
+        assert!(stdout.contains("<promise>COMPLETE</promise>"));
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn write_fake_codex(workdir: &Path) -> std::path::PathBuf {
+        let bin_dir = workdir.join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+
+        let codex_path = bin_dir.join("codex");
+        fs::write(
+            &codex_path,
+            r#"#!/bin/sh
+mode="${MOCK_CODEX_MODE:-complete}"
+if [ "$mode" = "complete" ]; then
+  printf 'done\n<promise>COMPLETE</promise>\n'
+elif [ "$mode" = "slow_complete" ]; then
+  sleep 2
+  printf 'done\n<promise>COMPLETE</promise>\n'
+elif [ "$mode" = "incomplete" ]; then
+  printf 'still working\n'
+else
+  printf 'agent error\n' 1>&2
+  exit 1
+fi
+"#,
+        )
+        .expect("write fake codex");
+
+        let mut perms = fs::metadata(&codex_path)
+            .expect("stat fake codex")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&codex_path, perms).expect("chmod fake codex");
+
+        bin_dir
+    }
+
+    fn seed_tasks(workdir: &Path, task_status: TaskStatus) {
+        let state = StateManager::new(workdir).expect("create state manager");
+        let now = Utc::now();
+        let task_list = TaskList {
+            version: 1,
+            prd_path: workdir.join("prd.md").to_string_lossy().to_string(),
+            created_at: now,
+            updated_at: now,
+            tasks: vec![Task {
+                id: "T6".to_string(),
+                title: "Orchestrator loop integration tests".to_string(),
+                description: "T6 body".to_string(),
+                priority: 1,
+                status: task_status,
+                depends_on: vec![],
+                completed_at: None,
+                notes: None,
+            }],
+        };
+        state.save_tasks(&task_list).expect("save seeded tasks");
+    }
+
+    fn run_args(prd_path: &Path, workdir: &Path, max_iterations: u32, max_failures: u32) -> RunArgs {
+        RunArgs {
+            prd: prd_path.to_path_buf(),
+            agent: "codex".to_string(),
+            model: None,
+            max_iterations,
+            timeout: 5,
+            stall_timeout: 5,
+            max_failures,
+            workdir: Some(workdir.to_path_buf()),
+            branch: None,
+            no_branch: true,
+            verbose: false,
+            dry_run: false,
+            state_name: None,
+            loop_status: None,
+            cancel_flag: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn single_iteration_marks_task_complete_and_updates_progress() {
+        let _guard = env_lock().lock().expect("lock env mutation");
+        let dir = tempdir().expect("create tempdir");
+        let prd_path = dir.path().join("prd.md");
+        fs::write(&prd_path, "# PRD").expect("write prd");
+        seed_tasks(dir.path(), TaskStatus::Pending);
+        let bin_dir = write_fake_codex(dir.path());
+
+        let old_path = std::env::var("PATH").ok();
+        let new_path = match old_path.as_deref() {
+            Some(path) if !path.is_empty() => format!("{}:{}", bin_dir.display(), path),
+            _ => bin_dir.display().to_string(),
+        };
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("MOCK_CODEX_MODE", "complete");
+
+        run(run_args(&prd_path, dir.path(), 5, 3))
+            .await
+            .expect("run orchestrator");
+
+        if let Some(path) = old_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        std::env::remove_var("MOCK_CODEX_MODE");
+
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let tasks = state
+            .load_tasks()
+            .expect("load tasks")
+            .expect("tasks should exist");
+        assert_eq!(tasks.tasks[0].status, TaskStatus::Complete);
+
+        let progress = fs::read_to_string(&state.progress_file).expect("read progress");
+        assert!(progress.contains("**Task T6 complete**"));
+        assert!(progress.contains("**COMPLETE** — all tasks finished successfully."));
+
+        let logs: Vec<_> = fs::read_dir(&state.logs_dir)
+            .expect("read logs dir")
+            .collect::<Result<_, _>>()
+            .expect("collect logs");
+        assert_eq!(logs.len(), 1, "one loop iteration should run");
+    }
+
+    #[tokio::test]
+    async fn three_consecutive_incomplete_iterations_trigger_circuit_breaker() {
+        let _guard = env_lock().lock().expect("lock env mutation");
+        let dir = tempdir().expect("create tempdir");
+        let prd_path = dir.path().join("prd.md");
+        fs::write(&prd_path, "# PRD").expect("write prd");
+        seed_tasks(dir.path(), TaskStatus::Pending);
+        let bin_dir = write_fake_codex(dir.path());
+
+        let old_path = std::env::var("PATH").ok();
+        let new_path = match old_path.as_deref() {
+            Some(path) if !path.is_empty() => format!("{}:{}", bin_dir.display(), path),
+            _ => bin_dir.display().to_string(),
+        };
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("MOCK_CODEX_MODE", "incomplete");
+
+        run(run_args(&prd_path, dir.path(), 10, 3))
+            .await
+            .expect("run orchestrator");
+
+        if let Some(path) = old_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        std::env::remove_var("MOCK_CODEX_MODE");
+
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let tasks = state
+            .load_tasks()
+            .expect("load tasks")
+            .expect("tasks should exist");
+        assert_eq!(
+            tasks.tasks[0].status,
+            TaskStatus::Pending,
+            "incomplete iterations should reset task to pending"
+        );
+
+        let progress = fs::read_to_string(&state.progress_file).expect("read progress");
+        assert!(progress.contains("Consecutive failures: 1/3"));
+        assert!(progress.contains("Consecutive failures: 2/3"));
+        assert!(progress.contains("Consecutive failures: 3/3"));
+        assert!(
+            progress.contains(
+                "**STOPPED** — circuit breaker after 3 consecutive failures (iteration 4)."
+            ),
+            "circuit breaker entry missing from progress.md"
+        );
+
+        let logs: Vec<_> = fs::read_dir(&state.logs_dir)
+            .expect("read logs dir")
+            .collect::<Result<_, _>>()
+            .expect("collect logs");
+        assert_eq!(logs.len(), 3, "circuit breaker should stop after 3 failures");
+    }
+
+    #[tokio::test]
+    async fn all_tasks_complete_exits_early_without_iteration() {
+        let _guard = env_lock().lock().expect("lock env mutation");
+        let dir = tempdir().expect("create tempdir");
+        let prd_path = dir.path().join("prd.md");
+        fs::write(&prd_path, "# PRD").expect("write prd");
+        seed_tasks(dir.path(), TaskStatus::Complete);
+        let bin_dir = write_fake_codex(dir.path());
+
+        let old_path = std::env::var("PATH").ok();
+        let new_path = match old_path.as_deref() {
+            Some(path) if !path.is_empty() => format!("{}:{}", bin_dir.display(), path),
+            _ => bin_dir.display().to_string(),
+        };
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("MOCK_CODEX_MODE", "complete");
+
+        run(run_args(&prd_path, dir.path(), 5, 3))
+            .await
+            .expect("run orchestrator");
+
+        if let Some(path) = old_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        std::env::remove_var("MOCK_CODEX_MODE");
+
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let progress = fs::read_to_string(&state.progress_file).expect("read progress");
+        assert!(progress.contains("**COMPLETE** — all tasks finished successfully."));
+
+        let logs: Vec<_> = fs::read_dir(&state.logs_dir)
+            .expect("read logs dir")
+            .collect::<Result<_, _>>()
+            .expect("collect logs");
+        assert!(logs.is_empty(), "no iteration should run when all tasks are complete");
+    }
+
+    #[tokio::test]
+    async fn lock_file_is_written_with_pid_and_removed_on_clean_exit() {
+        let _guard = env_lock().lock().expect("lock env mutation");
+        let dir = tempdir().expect("create tempdir");
+        let prd_path = dir.path().join("prd.md");
+        fs::write(&prd_path, "# PRD").expect("write prd");
+        seed_tasks(dir.path(), TaskStatus::Pending);
+        let bin_dir = write_fake_codex(dir.path());
+
+        let old_path = std::env::var("PATH").ok();
+        let new_path = match old_path.as_deref() {
+            Some(path) if !path.is_empty() => format!("{}:{}", bin_dir.display(), path),
+            _ => bin_dir.display().to_string(),
+        };
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("MOCK_CODEX_MODE", "slow_complete");
+
+        let args = run_args(&prd_path, dir.path(), 5, 3);
+        let handle = tokio::spawn(async move { run(args).await });
+
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let expected_pid = std::process::id();
+
+        let started = Instant::now();
+        let mut seen_pid = None;
+        while started.elapsed() < Duration::from_secs(2) {
+            if let Some(lock) = state.read_lock().expect("read lock during run") {
+                seen_pid = Some(lock.pid);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let observed_pid = seen_pid.expect("lock file should be visible while run is active");
+        assert_eq!(observed_pid, expected_pid, "lock file should contain current PID");
+
+        handle
+            .await
+            .expect("join orchestrator task")
+            .expect("run orchestrator");
+
+        assert!(
+            !state.lock_file.exists(),
+            "lock file should be removed after normal exit"
+        );
+
+        if let Some(path) = old_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        std::env::remove_var("MOCK_CODEX_MODE");
+    }
+}

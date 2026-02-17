@@ -195,3 +195,112 @@ pub struct StopArgs {
     #[arg(long)]
     pub workdir: Option<PathBuf>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[test]
+    fn run_subcommand_parses_prd_path() {
+        let cli = Cli::try_parse_from(["ralph", "run", "prd.md"]).expect("parse should succeed");
+
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.prd, PathBuf::from("prd.md"));
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn run_subcommand_parses_agent_iterations_and_timeout_flags() {
+        let cli = Cli::try_parse_from([
+            "ralph",
+            "run",
+            "prd.md",
+            "--agent",
+            "gemini",
+            "--max-iterations",
+            "5",
+            "--timeout",
+            "300",
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.prd, PathBuf::from("prd.md"));
+                assert_eq!(args.agent, "gemini");
+                assert_eq!(args.max_iterations, 5);
+                assert_eq!(args.timeout, 300);
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parse_subcommand_parses_prd_path() {
+        let cli = Cli::try_parse_from(["ralph", "parse", "prd.md"]).expect("parse should succeed");
+
+        match cli.command {
+            Commands::Parse(args) => {
+                assert_eq!(args.prd, PathBuf::from("prd.md"));
+            }
+            _ => panic!("expected parse command"),
+        }
+    }
+
+    #[test]
+    fn status_subcommand_parses_without_args() {
+        let cli = Cli::try_parse_from(["ralph", "status"]).expect("parse should succeed");
+
+        match cli.command {
+            Commands::Status(args) => {
+                assert!(args.workdir.is_none());
+            }
+            _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
+    fn stop_subcommand_parses_all_flag() {
+        let cli = Cli::try_parse_from(["ralph", "stop", "--all"]).expect("parse should succeed");
+
+        match cli.command {
+            Commands::Stop(args) => {
+                assert!(args.all);
+                assert!(args.name.is_none());
+            }
+            _ => panic!("expected stop command"),
+        }
+    }
+
+    #[test]
+    fn watch_subcommand_parses_multiple_prds_and_parallel() {
+        let cli = Cli::try_parse_from(["ralph", "watch", "a.md", "b.md", "--parallel", "2"])
+            .expect("parse should succeed");
+
+        match cli.command {
+            Commands::Watch(args) => {
+                assert_eq!(args.prds, vec![PathBuf::from("a.md"), PathBuf::from("b.md")]);
+                assert_eq!(args.parallel, Some(2));
+            }
+            _ => panic!("expected watch command"),
+        }
+    }
+
+    #[test]
+    fn unknown_flags_produce_helpful_errors() {
+        let err = match Cli::try_parse_from(["ralph", "run", "prd.md", "--bogus"]) {
+            Ok(_) => panic!("unknown flag should fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("--bogus"));
+        assert!(rendered.to_ascii_lowercase().contains("usage"));
+    }
+}

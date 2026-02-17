@@ -251,3 +251,171 @@ fn unix_now_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command as StdCommand;
+    use tempfile::tempdir;
+    use tokio::time::timeout;
+
+    fn unix_now_secs_for_test() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    fn run_git(workdir: &Path, args: &[&str]) {
+        let output = StdCommand::new("git")
+            .args(args)
+            .current_dir(workdir)
+            .output()
+            .expect("git command should run");
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!("git {} failed: {}", args.join(" "), stderr.trim());
+        }
+    }
+
+    fn init_repo(workdir: &Path) {
+        run_git(workdir, &["init"]);
+        run_git(workdir, &["config", "user.name", "Watcher Test"]);
+        run_git(
+            workdir,
+            &["config", "user.email", "watcher-test@example.com"],
+        );
+    }
+
+    #[tokio::test]
+    async fn stall_detection_fires_after_timeout_with_no_output() {
+        let dir = tempdir().expect("create tempdir");
+        let config = WatcherConfig {
+            check_interval: Duration::from_millis(25),
+            stall_timeout: Duration::from_secs(1),
+            disk_warn_threshold: 0,
+            workdir: dir.path().to_path_buf(),
+        };
+
+        let (_handle, mut event_rx, last_output_ts) = start_watcher(config);
+        last_output_ts.store(unix_now_secs_for_test().saturating_sub(5), Ordering::Relaxed);
+
+        let event = timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("stall event should arrive")
+            .expect("event channel should stay open");
+
+        match event {
+            WatcherEvent::StallDetected { no_output_secs } => {
+                assert!(no_output_secs >= 1, "unexpected no_output_secs: {no_output_secs}");
+            }
+            other => panic!("expected StallDetected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn disk_space_warning_triggers_when_df_reports_low_space() {
+        let dir = tempdir().expect("create tempdir");
+
+        let config = WatcherConfig {
+            check_interval: Duration::from_millis(25),
+            stall_timeout: Duration::from_secs(3600),
+            // Any finite free-space value is less than u64::MAX, so the warning
+            // should fire on the first successful `df` check without env mocking.
+            disk_warn_threshold: u64::MAX,
+            workdir: dir.path().to_path_buf(),
+        };
+
+        let (_handle, mut event_rx, _last_output_ts) = start_watcher(config);
+        let event = timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("disk warning should arrive")
+            .expect("event channel should stay open");
+
+        match event {
+            WatcherEvent::DiskSpaceWarning { free_bytes } => {
+                assert!(free_bytes > 0, "expected positive free-space bytes");
+            }
+            other => panic!("expected DiskSpaceWarning, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn git_conflict_detection_emits_event_for_uu_status() {
+        let dir = tempdir().expect("create tempdir");
+        init_repo(dir.path());
+
+        let file_path = dir.path().join("conflict.txt");
+        fs::write(&file_path, "base\n").expect("write base file");
+        run_git(dir.path(), &["add", "conflict.txt"]);
+        run_git(dir.path(), &["commit", "-m", "base"]);
+
+        let default_branch = StdCommand::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .expect("resolve default branch");
+        assert!(default_branch.status.success(), "resolve default branch");
+        let default_branch = String::from_utf8_lossy(&default_branch.stdout)
+            .trim()
+            .to_string();
+
+        run_git(dir.path(), &["checkout", "-b", "feature/conflict"]);
+        fs::write(&file_path, "feature\n").expect("write feature variant");
+        run_git(dir.path(), &["commit", "-am", "feature change"]);
+
+        run_git(dir.path(), &["checkout", &default_branch]);
+        fs::write(&file_path, "main\n").expect("write main variant");
+        run_git(dir.path(), &["commit", "-am", "main change"]);
+
+        let merge_output = StdCommand::new("git")
+            .args(["merge", "feature/conflict"])
+            .current_dir(dir.path())
+            .output()
+            .expect("run merge");
+        assert!(
+            !merge_output.status.success(),
+            "merge should fail with conflict"
+        );
+
+        let config = WatcherConfig {
+            check_interval: Duration::from_millis(25),
+            stall_timeout: Duration::from_secs(3600),
+            disk_warn_threshold: 0,
+            workdir: dir.path().to_path_buf(),
+        };
+
+        let (_handle, mut event_rx, _last_output_ts) = start_watcher(config);
+        let event = timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("git conflict event should arrive")
+            .expect("event channel should stay open");
+
+        match event {
+            WatcherEvent::GitConflictsDetected => {}
+            other => panic!("expected GitConflictsDetected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn watcher_exits_when_handle_is_dropped() {
+        let dir = tempdir().expect("create tempdir");
+        let config = WatcherConfig {
+            check_interval: Duration::from_millis(25),
+            stall_timeout: Duration::from_secs(3600),
+            disk_warn_threshold: 0,
+            workdir: dir.path().to_path_buf(),
+        };
+
+        let (handle, mut event_rx, _last_output_ts) = start_watcher(config);
+        drop(handle);
+
+        let recv = timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("watcher should terminate and close channel");
+        assert!(recv.is_none(), "event channel should close after shutdown");
+    }
+}
