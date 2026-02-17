@@ -42,7 +42,6 @@ impl GitManager {
     }
 
     /// Return the name of the currently checked-out branch.
-    #[allow(dead_code)]
     pub async fn current_branch(&self) -> Result<String> {
         self.run(&["rev-parse", "--abbrev-ref", "HEAD"]).await
     }

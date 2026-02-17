@@ -185,8 +185,7 @@ impl StateManager {
         let ralph_dir = workdir.join(".ralph");
         let logs_dir = ralph_dir.join("logs");
 
-        fs::create_dir_all(&logs_dir)
-            .context("Failed to create .ralph/logs/ directory")?;
+        fs::create_dir_all(&logs_dir).context("Failed to create .ralph/logs/ directory")?;
 
         Ok(Self {
             tasks_file: ralph_dir.join("tasks.json"),
@@ -222,8 +221,8 @@ impl StateManager {
             return Ok(None);
         }
 
-        let content = fs::read_to_string(&self.tasks_file)
-            .context("Failed to read .ralph/tasks.json")?;
+        let content =
+            fs::read_to_string(&self.tasks_file).context("Failed to read .ralph/tasks.json")?;
 
         let list: TaskList =
             serde_json::from_str(&content).context("Failed to parse .ralph/tasks.json")?;
@@ -233,6 +232,7 @@ impl StateManager {
     }
 
     /// Read tasks.json if it exists.
+    #[cfg(test)]
     pub fn read_tasks(&self) -> Result<Option<TaskList>> {
         self.load_tasks()
     }
@@ -256,11 +256,13 @@ impl StateManager {
     }
 
     /// Atomically write tasks.json.
+    #[cfg(test)]
     pub fn write_tasks(&self, tasks: &TaskList) -> Result<()> {
         self.save_tasks(tasks)
     }
 
     /// Return the highest-priority pending task whose dependencies are complete.
+    #[cfg(test)]
     pub fn pick_next_task<'a>(&self, task_list: &'a TaskList) -> Option<&'a Task> {
         let complete_ids: HashSet<&str> = task_list
             .tasks
@@ -273,11 +275,16 @@ impl StateManager {
             .tasks
             .iter()
             .filter(|t| t.status == TaskStatus::Pending)
-            .filter(|t| t.depends_on.iter().all(|dep| complete_ids.contains(dep.as_str())))
+            .filter(|t| {
+                t.depends_on
+                    .iter()
+                    .all(|dep| complete_ids.contains(dep.as_str()))
+            })
             .min_by_key(|t| t.priority)
     }
 
     /// Mark one task complete and persist tasks.json.
+    #[cfg(test)]
     pub fn mark_complete(&self, task_id: &str) -> Result<()> {
         let mut list = self
             .load_tasks()?
@@ -316,8 +323,7 @@ impl StateManager {
         if !self.lock_file.exists() {
             return Ok(None);
         }
-        let content =
-            fs::read_to_string(&self.lock_file).context("Failed to read .ralph/lock")?;
+        let content = fs::read_to_string(&self.lock_file).context("Failed to read .ralph/lock")?;
         let lock: LockFile =
             serde_json::from_str(&content).context("Failed to parse .ralph/lock")?;
         Ok(Some(lock))
@@ -599,8 +605,10 @@ mod tests {
         let content = fs::read_to_string(&state.progress_file).expect("read progress");
         assert!(content.contains("entry one"));
         assert!(content.contains("entry two"));
-        assert!(content.find("entry one").expect("first entry exists")
-            < content.find("entry two").expect("second entry exists"));
+        assert!(
+            content.find("entry one").expect("first entry exists")
+                < content.find("entry two").expect("second entry exists")
+        );
     }
 
     #[test]

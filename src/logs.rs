@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::AsyncReadExt;
 use tokio::time::{interval, Duration};
 
 use crate::cli::LogsArgs;

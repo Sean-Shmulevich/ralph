@@ -20,10 +20,6 @@ impl ClaudeAgent {
 }
 
 impl Agent for ClaudeAgent {
-    fn name(&self) -> &str {
-        "claude"
-    }
-
     fn is_available(&self) -> bool {
         std::process::Command::new("which")
             .arg("claude")

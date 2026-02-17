@@ -23,10 +23,6 @@ impl CodexAgent {
 }
 
 impl Agent for CodexAgent {
-    fn name(&self) -> &str {
-        "codex"
-    }
-
     fn is_available(&self) -> bool {
         std::process::Command::new("which")
             .arg("codex")

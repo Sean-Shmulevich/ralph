@@ -3,6 +3,7 @@ use chrono::Utc;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 use tokio::fs as tfs;
 use tokio::io::AsyncWriteExt as _;
 use tokio::time::Duration;
@@ -81,9 +82,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let is_watch_mode = args.state_name.is_some();
 
     // Set up webhook hook if configured
-    let hook = args.hook_url.as_ref().map(|url| {
-        HookConfig::new(url.clone(), args.hook_token.clone())
-    });
+    let hook = args
+        .hook_url
+        .as_ref()
+        .map(|url| HookConfig::new(url.clone(), args.hook_token.clone()));
 
     if !is_watch_mode {
         // Interactive `ralph run` — print startup banner
@@ -93,7 +95,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
         println!("    Workdir:         {}", workdir.display());
         println!("    Max iterations:  {}", args.max_iterations);
         println!("    Timeout:         {}s per iteration", args.timeout);
-        println!("    Stall timeout:   {}s no-output kill", args.stall_timeout);
+        println!(
+            "    Stall timeout:   {}s no-output kill",
+            args.stall_timeout
+        );
         println!("    Max failures:    {}", args.max_failures);
     }
 
@@ -147,6 +152,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 eprintln!("⚠️   Git branch warning: {e}");
             }
             log_to_status(&args.loop_status, format!("⚠️  Git branch warning: {e}"));
+        } else if !is_watch_mode {
+            if let Ok(current_branch) = git.current_branch().await {
+                println!("    Current branch: {}", current_branch);
+            }
         }
     }
 
@@ -181,7 +190,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 println!("\n🔍  No tasks.json found — parsing PRD…");
             }
             log_to_status(&args.loop_status, "Parsing PRD…".to_string());
-            let tl = parse_prd(&prd_path, &args.agent, args.model.as_deref()).await?;
+            let tl = parse_prd(
+                &prd_path,
+                &args.agent,
+                args.model.as_deref(),
+                args.parse_timeout,
+            )
+            .await?;
             state.save_tasks(&tl)?;
             if !is_watch_mode {
                 println!("✅  Parsed {} tasks → tasks.json", tl.tasks.len());
@@ -231,10 +246,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     args.max_iterations
                 );
             }
-            fire_hook(&hook, HookEvent::MaxIterations {
-                max_iterations: args.max_iterations,
-                progress: make_progress(&task_list),
-            }).await;
+            fire_hook(
+                &hook,
+                HookEvent::MaxIterations {
+                    max_iterations: args.max_iterations,
+                    progress: make_progress(&task_list),
+                },
+            )
+            .await;
             update_loop_state(&args.loop_status, LoopState::Stopped);
             break;
         }
@@ -250,11 +269,15 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 "**STOPPED** — circuit breaker after {} consecutive failures (iteration {}).",
                 args.max_failures, iteration
             ))?;
-            fire_hook(&hook, HookEvent::CircuitBreaker {
-                consecutive_failures,
-                last_error: "Too many consecutive failures".to_string(),
-                progress: make_progress(&task_list),
-            }).await;
+            fire_hook(
+                &hook,
+                HookEvent::CircuitBreaker {
+                    consecutive_failures,
+                    last_error: "Too many consecutive failures".to_string(),
+                    progress: make_progress(&task_list),
+                },
+            )
+            .await;
             update_loop_state(
                 &args.loop_status,
                 LoopState::Failed(format!("{} consecutive failures", args.max_failures)),
@@ -266,17 +289,35 @@ pub async fn run(args: RunArgs) -> Result<()> {
         let task = match pick_next_task(&task_list) {
             Some(t) => t.clone(),
             None => {
+                if !all_tasks_complete(&task_list) {
+                    let msg = "No actionable pending tasks remain, but not all tasks are complete.";
+                    if !is_watch_mode {
+                        eprintln!("\n⚠️  {msg}");
+                    }
+                    state.append_progress(&format!("**STOPPED** — {msg}"))?;
+                    update_loop_state(&args.loop_status, LoopState::Failed(msg.to_string()));
+                    break;
+                }
+
                 if !is_watch_mode {
                     println!("\n✅  All tasks complete! PRD implementation finished.");
                 }
                 state.append_progress("**COMPLETE** — all tasks finished successfully.")?;
-                fire_hook(&hook, HookEvent::AllComplete {
-                    total_tasks: task_list.tasks.len() as u32,
-                    total_iterations: iteration - 1,
-                    total_duration_secs: 0,
-                    summary: format!("All {} tasks completed in {} iterations", task_list.tasks.len(), iteration - 1),
-                    progress: make_progress(&task_list),
-                }).await;
+                fire_hook(
+                    &hook,
+                    HookEvent::AllComplete {
+                        total_tasks: task_list.tasks.len() as u32,
+                        total_iterations: iteration - 1,
+                        total_duration_secs: 0,
+                        summary: format!(
+                            "All {} tasks completed in {} iterations",
+                            task_list.tasks.len(),
+                            iteration - 1
+                        ),
+                        progress: make_progress(&task_list),
+                    },
+                )
+                .await;
                 update_loop_state(&args.loop_status, LoopState::Complete);
                 break;
             }
@@ -344,6 +385,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
         // Snapshot tasks.json before the agent runs (detect agent-side changes)
         let tasks_snapshot_before = serde_json::to_string(&task_list.tasks).unwrap_or_default();
 
+        // Track per-iteration runtime for hooks and terminal output.
+        let iteration_started_at = Instant::now();
+
         // Spawn agent with timeout + stall detection
         let iter_result = run_iteration(
             agent.as_ref(),
@@ -356,6 +400,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             args.loop_status.clone(),
         )
         .await;
+        let iteration_duration_secs = iteration_started_at.elapsed().as_secs();
 
         match iter_result {
             Ok(stdout) => {
@@ -375,9 +420,15 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
                 if task_done {
                     if !is_watch_mode {
-                        println!("    ✅  Task {} — complete", task.id);
+                        println!(
+                            "    ✅  Task {} — complete ({}s)",
+                            task.id, iteration_duration_secs
+                        );
                     }
-                    log_to_status(&args.loop_status, format!("✅ Task {} complete: {}", task.id, task.title));
+                    log_to_status(
+                        &args.loop_status,
+                        format!("✅ Task {} complete: {}", task.id, task.title),
+                    );
                     consecutive_failures = 0;
 
                     set_task_status(&mut task_list, &task.id, TaskStatus::Complete);
@@ -404,22 +455,28 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     ))?;
 
                     // Fire webhook
-                    fire_hook(&hook, HookEvent::TaskComplete {
-                        task_id: task.id.clone(),
-                        task_title: task.title.clone(),
-                        iteration,
-                        duration_secs: 0, // TODO: track per-iteration timing
-                        files_changed: vec![],
-                        summary: format!("Task {} — {} completed in iteration {}", task.id, task.title, iteration),
-                        progress: make_progress(&task_list),
-                    }).await;
+                    fire_hook(
+                        &hook,
+                        HookEvent::TaskComplete {
+                            task_id: task.id.clone(),
+                            task_title: task.title.clone(),
+                            iteration,
+                            duration_secs: iteration_duration_secs,
+                            files_changed: vec![],
+                            summary: format!(
+                                "Task {} — {} completed in iteration {}",
+                                task.id, task.title, iteration
+                            ),
+                            progress: make_progress(&task_list),
+                        },
+                    )
+                    .await;
 
                     // Auto-commit if there are changes
                     if !args.no_branch && git.is_git_repo().await {
                         match git.has_changes().await {
                             Ok(true) => {
-                                let msg =
-                                    format!("feat: {} — {} (ralph)", task.id, task.title);
+                                let msg = format!("feat: {} — {} (ralph)", task.id, task.title);
                                 match git.commit_all(&msg).await {
                                     Ok(_) => {
                                         if !is_watch_mode {
@@ -462,15 +519,19 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         iteration, task.id, consecutive_failures, args.max_failures
                     ))?;
 
-                    fire_hook(&hook, HookEvent::TaskFailed {
-                        task_id: task.id.clone(),
-                        task_title: task.title.clone(),
-                        iteration,
-                        duration_secs: 0,
-                        error: "Task not completed this iteration".to_string(),
-                        consecutive_failures,
-                        progress: make_progress(&task_list),
-                    }).await;
+                    fire_hook(
+                        &hook,
+                        HookEvent::TaskFailed {
+                            task_id: task.id.clone(),
+                            task_title: task.title.clone(),
+                            iteration,
+                            duration_secs: iteration_duration_secs,
+                            error: "Task not completed this iteration".to_string(),
+                            consecutive_failures,
+                            progress: make_progress(&task_list),
+                        },
+                    )
+                    .await;
                 }
             }
 
@@ -490,15 +551,19 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     iteration, task.id, consecutive_failures, args.max_failures
                 ))?;
 
-                fire_hook(&hook, HookEvent::TaskFailed {
-                    task_id: task.id.clone(),
-                    task_title: task.title.clone(),
-                    iteration,
-                    duration_secs: 0,
-                    error: format!("{e}"),
-                    consecutive_failures,
-                    progress: make_progress(&task_list),
-                }).await;
+                fire_hook(
+                    &hook,
+                    HookEvent::TaskFailed {
+                        task_id: task.id.clone(),
+                        task_title: task.title.clone(),
+                        iteration,
+                        duration_secs: iteration_duration_secs,
+                        error: format!("{e}"),
+                        consecutive_failures,
+                        progress: make_progress(&task_list),
+                    },
+                )
+                .await;
             }
         }
 
@@ -515,8 +580,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
 // ── Hook helpers ──────────────────────────────────────────────────────────────
 
 fn make_progress(task_list: &TaskList) -> Progress {
-    let completed = task_list.tasks.iter().filter(|t| t.status == TaskStatus::Complete).count() as u32;
-    let failed = task_list.tasks.iter().filter(|t| t.status == TaskStatus::Failed).count() as u32;
+    let completed = task_list
+        .tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Complete)
+        .count() as u32;
+    let failed = task_list
+        .tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Failed)
+        .count() as u32;
     let total = task_list.tasks.len() as u32;
     Progress {
         completed,
@@ -585,7 +658,7 @@ async fn run_iteration(
     // ── Start background watcher ──────────────────────────────────────────────
     let watcher_config = WatcherConfig::new(workdir.to_path_buf())
         .with_stall_timeout(Duration::from_secs(stall_timeout_secs));
-    let (_watcher_handle, mut event_rx, last_output_ts) = start_watcher(watcher_config);
+    let (watcher_handle, mut event_rx, last_output_ts) = start_watcher(watcher_config);
 
     // ── Read stdout and stderr concurrently, updating stall timestamp ─────────
     let ts_stdout = last_output_ts.clone();
@@ -688,6 +761,7 @@ async fn run_iteration(
     // Collect output (pipes are now closed / tasks will drain quickly)
     let stdout_str = stdout_task.await.unwrap_or_default();
     let stderr_str = stderr_task.await.unwrap_or_default();
+    watcher_handle.shutdown();
 
     // Write combined log
     let exit_status = outcome?; // propagate any kill/timeout errors
@@ -730,8 +804,19 @@ fn pick_next_task(task_list: &TaskList) -> Option<&Task> {
         .tasks
         .iter()
         .filter(|t| t.status == TaskStatus::Pending)
-        .filter(|t| t.depends_on.iter().all(|dep| complete_ids.contains(dep.as_str())))
+        .filter(|t| {
+            t.depends_on
+                .iter()
+                .all(|dep| complete_ids.contains(dep.as_str()))
+        })
         .min_by_key(|t| t.priority)
+}
+
+fn all_tasks_complete(task_list: &TaskList) -> bool {
+    task_list
+        .tasks
+        .iter()
+        .all(|task| task.status == TaskStatus::Complete)
 }
 
 fn set_task_status(task_list: &mut TaskList, task_id: &str, status: TaskStatus) {
@@ -840,10 +925,6 @@ mod tests {
     }
 
     impl Agent for MockAgent {
-        fn name(&self) -> &str {
-            "mock"
-        }
-
         fn is_available(&self) -> bool {
             true
         }
@@ -866,18 +947,9 @@ mod tests {
         let log_path = dir.path().join("iteration.log");
         let agent = MockAgent::new("echo", &["hello"]);
 
-        let stdout = run_iteration(
-            &agent,
-            "prompt",
-            dir.path(),
-            &log_path,
-            5,
-            5,
-            false,
-            None,
-        )
-        .await
-        .expect("run iteration");
+        let stdout = run_iteration(&agent, "prompt", dir.path(), &log_path, 5, 5, false, None)
+            .await
+            .expect("run iteration");
 
         assert_eq!(stdout.trim(), "hello");
     }
@@ -888,18 +960,9 @@ mod tests {
         let log_path = dir.path().join("iteration.log");
         let agent = MockAgent::new("sh", &["-c", "echo out; echo err >&2"]);
 
-        let stdout = run_iteration(
-            &agent,
-            "prompt",
-            dir.path(),
-            &log_path,
-            5,
-            5,
-            false,
-            None,
-        )
-        .await
-        .expect("run iteration");
+        let stdout = run_iteration(&agent, "prompt", dir.path(), &log_path, 5, 5, false, None)
+            .await
+            .expect("run iteration");
 
         assert!(stdout.contains("out"));
         assert!(!stdout.contains("err"));
@@ -918,18 +981,9 @@ mod tests {
         let agent = MockAgent::new("sh", &["-c", "sleep 10"]);
         let started = Instant::now();
 
-        let err = run_iteration(
-            &agent,
-            "prompt",
-            dir.path(),
-            &log_path,
-            1,
-            60,
-            false,
-            None,
-        )
-        .await
-        .expect_err("iteration should time out");
+        let err = run_iteration(&agent, "prompt", dir.path(), &log_path, 1, 60, false, None)
+            .await
+            .expect_err("iteration should time out");
 
         let elapsed = started.elapsed();
         assert!(
@@ -954,18 +1008,9 @@ mod tests {
         let log_path = dir.path().join("iteration.log");
         let agent = MockAgent::new("cat", &["response.txt"]);
 
-        let stdout = run_iteration(
-            &agent,
-            "prompt",
-            dir.path(),
-            &log_path,
-            5,
-            5,
-            false,
-            None,
-        )
-        .await
-        .expect("run iteration");
+        let stdout = run_iteration(&agent, "prompt", dir.path(), &log_path, 5, 5, false, None)
+            .await
+            .expect("run iteration");
 
         assert!(stdout.contains("<promise>COMPLETE</promise>"));
     }
@@ -1030,7 +1075,63 @@ fi
         state.save_tasks(&task_list).expect("save seeded tasks");
     }
 
-    fn run_args(prd_path: &Path, workdir: &Path, max_iterations: u32, max_failures: u32) -> RunArgs {
+    fn seed_custom_tasks(workdir: &Path, tasks: Vec<Task>) {
+        let state = StateManager::new(workdir).expect("create state manager");
+        let now = Utc::now();
+        let task_list = TaskList {
+            version: 1,
+            prd_path: workdir.join("prd.md").to_string_lossy().to_string(),
+            created_at: now,
+            updated_at: now,
+            tasks,
+        };
+        state.save_tasks(&task_list).expect("save seeded tasks");
+    }
+
+    #[test]
+    fn all_tasks_complete_requires_every_task_to_be_complete() {
+        let now = Utc::now();
+        let task_list = TaskList {
+            version: 1,
+            prd_path: "prd.md".to_string(),
+            created_at: now,
+            updated_at: now,
+            tasks: vec![
+                Task {
+                    id: "T1".to_string(),
+                    title: "done".to_string(),
+                    description: "done".to_string(),
+                    priority: 1,
+                    status: TaskStatus::Complete,
+                    depends_on: vec![],
+                    completed_at: None,
+                    notes: None,
+                },
+                Task {
+                    id: "T2".to_string(),
+                    title: "in progress".to_string(),
+                    description: "wip".to_string(),
+                    priority: 2,
+                    status: TaskStatus::InProgress,
+                    depends_on: vec![],
+                    completed_at: None,
+                    notes: None,
+                },
+            ],
+        };
+
+        assert!(
+            !all_tasks_complete(&task_list),
+            "complete + in_progress must not be treated as all complete"
+        );
+    }
+
+    fn run_args(
+        prd_path: &Path,
+        workdir: &Path,
+        max_iterations: u32,
+        max_failures: u32,
+    ) -> RunArgs {
         RunArgs {
             prd: prd_path.to_path_buf(),
             agent: "codex".to_string(),
@@ -1038,6 +1139,7 @@ fi
             max_iterations,
             timeout: 5,
             stall_timeout: 5,
+            parse_timeout: 5,
             max_failures,
             workdir: Some(workdir.to_path_buf()),
             branch: None,
@@ -1152,7 +1254,11 @@ fi
             .expect("read logs dir")
             .collect::<Result<_, _>>()
             .expect("collect logs");
-        assert_eq!(logs.len(), 3, "circuit breaker should stop after 3 failures");
+        assert_eq!(
+            logs.len(),
+            3,
+            "circuit breaker should stop after 3 failures"
+        );
     }
 
     #[tokio::test]
@@ -1191,7 +1297,76 @@ fi
             .expect("read logs dir")
             .collect::<Result<_, _>>()
             .expect("collect logs");
-        assert!(logs.is_empty(), "no iteration should run when all tasks are complete");
+        assert!(
+            logs.is_empty(),
+            "no iteration should run when all tasks are complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_and_in_progress_tasks_do_not_exit_early() {
+        let _guard = env_lock().lock().expect("lock env mutation");
+        let dir = tempdir().expect("create tempdir");
+        let prd_path = dir.path().join("prd.md");
+        fs::write(&prd_path, "# PRD").expect("write prd");
+        seed_custom_tasks(
+            dir.path(),
+            vec![
+                Task {
+                    id: "T1".to_string(),
+                    title: "already done".to_string(),
+                    description: "done".to_string(),
+                    priority: 1,
+                    status: TaskStatus::Complete,
+                    depends_on: vec![],
+                    completed_at: None,
+                    notes: None,
+                },
+                Task {
+                    id: "T2".to_string(),
+                    title: "in progress task".to_string(),
+                    description: "wip".to_string(),
+                    priority: 2,
+                    status: TaskStatus::InProgress,
+                    depends_on: vec![],
+                    completed_at: None,
+                    notes: None,
+                },
+            ],
+        );
+        let bin_dir = write_fake_codex(dir.path());
+
+        let old_path = std::env::var("PATH").ok();
+        let new_path = match old_path.as_deref() {
+            Some(path) if !path.is_empty() => format!("{}:{}", bin_dir.display(), path),
+            _ => bin_dir.display().to_string(),
+        };
+        std::env::set_var("PATH", new_path);
+        std::env::set_var("MOCK_CODEX_MODE", "complete");
+
+        run(run_args(&prd_path, dir.path(), 5, 3))
+            .await
+            .expect("run orchestrator");
+
+        if let Some(path) = old_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        std::env::remove_var("MOCK_CODEX_MODE");
+
+        let state = StateManager::new(dir.path()).expect("create state manager");
+        let progress = fs::read_to_string(&state.progress_file).expect("read progress");
+        assert!(
+            progress.contains("**Task T2 complete**"),
+            "ralph should run an iteration for the in_progress task rather than exiting early"
+        );
+
+        let logs: Vec<_> = fs::read_dir(&state.logs_dir)
+            .expect("read logs dir")
+            .collect::<Result<_, _>>()
+            .expect("collect logs");
+        assert_eq!(logs.len(), 1, "one iteration should run before completion");
     }
 
     #[tokio::test]
@@ -1228,7 +1403,10 @@ fi
         }
 
         let observed_pid = seen_pid.expect("lock file should be visible while run is active");
-        assert_eq!(observed_pid, expected_pid, "lock file should contain current PID");
+        assert_eq!(
+            observed_pid, expected_pid,
+            "lock file should contain current PID"
+        );
 
         handle
             .await

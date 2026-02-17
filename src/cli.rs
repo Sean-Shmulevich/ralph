@@ -15,6 +15,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Create a starter PRD template in the current directory
+    Init(InitArgs),
+    /// Check local environment health (agents, auth, git, disk)
+    Doctor(DoctorArgs),
     /// Run an agent loop for a single PRD
     Run(RunArgs),
     /// Parse a PRD and print the task list (no execution)
@@ -54,6 +58,10 @@ pub struct RunArgs {
     #[arg(long, default_value = "120")]
     pub stall_timeout: u64,
 
+    /// Timeout in seconds for PRD parsing (falls back to next available agent)
+    #[arg(long, default_value = "120")]
+    pub parse_timeout: u64,
+
     /// Maximum consecutive failures before circuit-breaking
     #[arg(long, default_value = "3")]
     pub max_failures: u32,
@@ -87,7 +95,6 @@ pub struct RunArgs {
     pub hook_token: Option<String>,
 
     // ── Internal fields set programmatically by `ralph watch` ─────────────────
-
     /// Name override for the state directory.
     /// If set, state lives in `.ralph-<state_name>/` instead of `.ralph/`.
     #[arg(skip)]
@@ -114,6 +121,10 @@ pub struct ParseArgs {
     /// Model override passed to the agent binary
     #[arg(long)]
     pub model: Option<String>,
+
+    /// Timeout in seconds for PRD parsing (falls back to next available agent)
+    #[arg(long, default_value = "120")]
+    pub parse_timeout: u64,
 
     /// Write tasks.json to this path instead of printing
     #[arg(long, short)]
@@ -212,6 +223,16 @@ pub struct StopArgs {
     pub workdir: Option<PathBuf>,
 }
 
+#[derive(Args, Debug)]
+pub struct InitArgs {}
+
+#[derive(Args, Debug)]
+pub struct DoctorArgs {
+    /// Directory to check (defaults to current directory)
+    #[arg(long)]
+    pub workdir: Option<PathBuf>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Cli, Commands};
@@ -231,6 +252,28 @@ mod tests {
     }
 
     #[test]
+    fn init_subcommand_parses_without_args() {
+        let cli = Cli::try_parse_from(["ralph", "init"]).expect("parse should succeed");
+
+        match cli.command {
+            Commands::Init(_args) => {}
+            _ => panic!("expected init command"),
+        }
+    }
+
+    #[test]
+    fn doctor_subcommand_parses_without_args() {
+        let cli = Cli::try_parse_from(["ralph", "doctor"]).expect("parse should succeed");
+
+        match cli.command {
+            Commands::Doctor(args) => {
+                assert!(args.workdir.is_none());
+            }
+            _ => panic!("expected doctor command"),
+        }
+    }
+
+    #[test]
     fn run_subcommand_parses_agent_iterations_and_timeout_flags() {
         let cli = Cli::try_parse_from([
             "ralph",
@@ -242,6 +285,8 @@ mod tests {
             "5",
             "--timeout",
             "300",
+            "--parse-timeout",
+            "45",
         ])
         .expect("parse should succeed");
 
@@ -251,6 +296,7 @@ mod tests {
                 assert_eq!(args.agent, "gemini");
                 assert_eq!(args.max_iterations, 5);
                 assert_eq!(args.timeout, 300);
+                assert_eq!(args.parse_timeout, 45);
             }
             _ => panic!("expected run command"),
         }
@@ -258,11 +304,13 @@ mod tests {
 
     #[test]
     fn parse_subcommand_parses_prd_path() {
-        let cli = Cli::try_parse_from(["ralph", "parse", "prd.md"]).expect("parse should succeed");
+        let cli = Cli::try_parse_from(["ralph", "parse", "prd.md", "--parse-timeout", "30"])
+            .expect("parse should succeed");
 
         match cli.command {
             Commands::Parse(args) => {
                 assert_eq!(args.prd, PathBuf::from("prd.md"));
+                assert_eq!(args.parse_timeout, 30);
             }
             _ => panic!("expected parse command"),
         }
@@ -300,7 +348,10 @@ mod tests {
 
         match cli.command {
             Commands::Watch(args) => {
-                assert_eq!(args.prds, vec![PathBuf::from("a.md"), PathBuf::from("b.md")]);
+                assert_eq!(
+                    args.prds,
+                    vec![PathBuf::from("a.md"), PathBuf::from("b.md")]
+                );
                 assert_eq!(args.parallel, Some(2));
             }
             _ => panic!("expected watch command"),

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::cli::StopArgs;
-use crate::state::{LockFile, StateManager};
+use crate::state::LockFile;
 
 pub async fn stop_loops(args: StopArgs) -> Result<()> {
     let workdir = resolve_workdir(args.workdir.as_deref())?;
@@ -133,15 +133,18 @@ fn is_pid_alive(pid: u32) -> bool {
         use nix::sys::signal::{kill, Signal};
         use nix::unistd::Pid;
         // kill(pid, 0) succeeds if the process exists and we have permission
-        kill(Pid::from_raw(pid as i32), Signal::SIGWINCH /* harmless */ )
-            .map(|_| true)
-            .unwrap_or_else(|_| {
-                // Try with signal 0 (existence check)
-                matches!(
-                    nix::errno::Errno::last(),
-                    nix::errno::Errno::EPERM // exists but no permission
-                )
-            })
+        kill(
+            Pid::from_raw(pid as i32),
+            Signal::SIGWINCH, /* harmless */
+        )
+        .map(|_| true)
+        .unwrap_or_else(|_| {
+            // Try with signal 0 (existence check)
+            matches!(
+                nix::errno::Errno::last(),
+                nix::errno::Errno::EPERM // exists but no permission
+            )
+        })
     }
 
     #[cfg(not(unix))]
@@ -178,6 +181,7 @@ async fn find_all_lock_files(workdir: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::StateManager;
     use chrono::Utc;
     use tempfile::tempdir;
 
@@ -201,7 +205,10 @@ mod tests {
             .expect("find an unused pid");
         let lock = sample_lock(stale_pid);
         state.write_lock(&lock).expect("write stale lock");
-        assert!(state.lock_file.exists(), "lock file should exist before cleanup");
+        assert!(
+            state.lock_file.exists(),
+            "lock file should exist before cleanup"
+        );
 
         send_sigterm_to_lock(&lock, &state.lock_file).expect("handle stale lock");
 

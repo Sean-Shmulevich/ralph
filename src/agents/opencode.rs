@@ -23,10 +23,6 @@ impl OpenCodeAgent {
 }
 
 impl Agent for OpenCodeAgent {
-    fn name(&self) -> &str {
-        "opencode"
-    }
-
     fn is_available(&self) -> bool {
         std::process::Command::new("which")
             .arg("opencode")

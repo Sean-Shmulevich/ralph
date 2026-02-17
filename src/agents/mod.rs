@@ -22,10 +22,6 @@ pub struct AgentProcess {
 /// `spawn` is intentionally synchronous — tokio's `Command::spawn()` doesn't need
 /// to be awaited. Only the *waiting* for the child and reading its output are async.
 pub trait Agent: Send + Sync {
-    /// Human-readable agent name (used in logs and messages).
-    #[allow(dead_code)]
-    fn name(&self) -> &str;
-
     /// Return `true` if the agent binary is on PATH and appears runnable.
     fn is_available(&self) -> bool;
 

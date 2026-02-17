@@ -21,10 +21,6 @@ impl GeminiAgent {
 }
 
 impl Agent for GeminiAgent {
-    fn name(&self) -> &str {
-        "gemini"
-    }
-
     fn is_available(&self) -> bool {
         std::process::Command::new("which")
             .arg("gemini")

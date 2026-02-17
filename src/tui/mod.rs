@@ -196,9 +196,9 @@ fn render(frame: &mut Frame, app: &mut TuiApp) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),               // title bar
-            Constraint::Length(table_height),    // loops table
-            Constraint::Min(3),                  // log view
+            Constraint::Length(3),            // title bar
+            Constraint::Length(table_height), // loops table
+            Constraint::Min(3),               // log view
         ])
         .split(area);
 
@@ -208,19 +208,23 @@ fn render(frame: &mut Frame, app: &mut TuiApp) {
 }
 
 fn render_title(frame: &mut Frame, area: ratatui::layout::Rect, active: usize, total: usize) {
-    let title = format!(" Ralph — {}/{} loops active  [Tab] switch  [↑↓jk] scroll  [q] quit ",
-        active, total);
+    let title = format!(
+        " Ralph — {}/{} loops active  [Tab] switch  [↑↓jk] scroll  [q] quit ",
+        active, total
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
-    let paragraph = Paragraph::new(title)
-        .block(block)
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    let paragraph = Paragraph::new(title).block(block).style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(paragraph, area);
 }
 
 fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut TuiApp) {
-    let header_cells = ["Name", "Agent", "Progress", "Status", "Time"]
+    let header_cells = ["Name", "Agent", "PRD", "Progress", "Status", "Time"]
         .iter()
         .map(|h| {
             Cell::from(*h).style(
@@ -242,15 +246,16 @@ fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut TuiApp
 
             let name_cell = Cell::from(s.name.clone());
             let agent_cell = Cell::from(s.agent.clone());
+            let prd_cell = Cell::from(s.prd_path.clone());
             let progress_cell = Cell::from(make_progress_bar(s.tasks_done, s.tasks_total, 12));
             let (status_text, status_color) = state_display(&s.state);
-            let status_cell =
-                Cell::from(status_text).style(Style::default().fg(status_color));
+            let status_cell = Cell::from(status_text).style(Style::default().fg(status_color));
             let time_cell = Cell::from(s.elapsed_str());
 
             Row::new(vec![
                 name_cell,
                 agent_cell,
+                prd_cell,
                 progress_cell,
                 status_cell,
                 time_cell,
@@ -266,8 +271,9 @@ fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut TuiApp
     let table = Table::new(
         rows,
         [
-            Constraint::Min(16),    // name
+            Constraint::Length(14), // name
             Constraint::Length(8),  // agent
+            Constraint::Min(20),    // prd path
             Constraint::Length(18), // progress bar
             Constraint::Length(12), // status
             Constraint::Length(8),  // time
@@ -312,7 +318,11 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut TuiApp)
         app.log_scroll = max_scroll;
     }
 
-    let title = format!(" [{loop_name}] Logs  (line {}/{})", app.log_scroll + view_height, content_height);
+    let title = format!(
+        " [{loop_name}] Logs  (line {}/{})",
+        app.log_scroll + view_height,
+        content_height
+    );
     let paragraph = Paragraph::new(log_lines)
         .block(
             Block::default()

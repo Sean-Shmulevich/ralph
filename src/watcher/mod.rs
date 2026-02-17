@@ -85,7 +85,6 @@ pub struct WatcherHandle {
 
 impl WatcherHandle {
     /// Explicitly stop the watcher (also happens when the handle is dropped).
-    #[allow(dead_code)]
     pub fn shutdown(self) {
         // Dropping _shutdown_tx sends the signal via oneshot.
         drop(self);
@@ -103,11 +102,7 @@ impl WatcherHandle {
 ///   reader tasks by calling `update_last_output(&last_output_ts)`.
 pub fn start_watcher(
     config: WatcherConfig,
-) -> (
-    WatcherHandle,
-    mpsc::Receiver<WatcherEvent>,
-    Arc<AtomicU64>,
-) {
+) -> (WatcherHandle, mpsc::Receiver<WatcherEvent>, Arc<AtomicU64>) {
     let (event_tx, event_rx) = mpsc::channel::<WatcherEvent>(16);
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
@@ -306,7 +301,10 @@ mod tests {
         };
 
         let (_handle, mut event_rx, last_output_ts) = start_watcher(config);
-        last_output_ts.store(unix_now_secs_for_test().saturating_sub(5), Ordering::Relaxed);
+        last_output_ts.store(
+            unix_now_secs_for_test().saturating_sub(5),
+            Ordering::Relaxed,
+        );
 
         let event = timeout(Duration::from_secs(2), event_rx.recv())
             .await
@@ -315,7 +313,10 @@ mod tests {
 
         match event {
             WatcherEvent::StallDetected { no_output_secs } => {
-                assert!(no_output_secs >= 1, "unexpected no_output_secs: {no_output_secs}");
+                assert!(
+                    no_output_secs >= 1,
+                    "unexpected no_output_secs: {no_output_secs}"
+                );
             }
             other => panic!("expected StallDetected, got {other:?}"),
         }

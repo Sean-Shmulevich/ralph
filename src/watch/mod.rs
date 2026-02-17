@@ -39,7 +39,11 @@ pub async fn watch(args: WatchArgs) -> Result<()> {
     // Derive unique slugs (deduplicate if two PRDs have the same stem)
     let slugs = make_unique_slugs(&prds);
 
-    println!("🚀  Ralph Watch — {} PRDs, parallel={}", prds.len(), parallel);
+    println!(
+        "🚀  Ralph Watch — {} PRDs, parallel={}",
+        prds.len(),
+        parallel
+    );
     for (prd, slug) in prds.iter().zip(slugs.iter()) {
         println!("    • {} → .ralph-{}/", prd.display(), slug);
     }
@@ -151,7 +155,11 @@ pub async fn watch(args: WatchArgs) -> Result<()> {
             };
             println!(
                 "    {} {}  {}/{} tasks  ({})",
-                icon, s.name, s.tasks_done, s.tasks_total, s.elapsed_str()
+                icon,
+                s.name,
+                s.tasks_done,
+                s.tasks_total,
+                s.elapsed_str()
             );
         }
     }
@@ -182,7 +190,13 @@ pub fn prd_slug(prd: &Path) -> String {
         .to_string_lossy()
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .trim_matches('-')
         .to_string()
@@ -223,6 +237,7 @@ fn build_run_args(
         max_iterations: watch_args.max_iterations,
         timeout: watch_args.timeout,
         stall_timeout: watch_args.stall_timeout,
+        parse_timeout: 120,
         max_failures: watch_args.max_failures,
         workdir: Some(workdir.to_path_buf()),
         // Git branching is disabled for parallel watch mode (avoids concurrent conflicts).

@@ -1,6 +1,5 @@
 //! Callback hooks — notify external systems (e.g. OpenClaw) when events occur.
 
-use anyhow::Result;
 use serde::Serialize;
 use std::time::Duration;
 
@@ -47,11 +46,6 @@ pub enum HookEvent {
         max_iterations: u32,
         progress: Progress,
     },
-    /// PRD parsing completed.
-    ParseComplete {
-        total_tasks: u32,
-        task_titles: Vec<String>,
-    },
 }
 
 /// Progress snapshot included in every event.
@@ -92,7 +86,6 @@ pub async fn send_hook(config: &HookConfig, event: &HookEvent) {
         HookEvent::AllComplete { .. } => "all_complete",
         HookEvent::CircuitBreaker { .. } => "circuit_breaker",
         HookEvent::MaxIterations { .. } => "max_iterations",
-        HookEvent::ParseComplete { .. } => "parse_complete",
     };
 
     let body = match serde_json::to_string(event) {
@@ -106,10 +99,14 @@ pub async fn send_hook(config: &HookConfig, event: &HookEvent) {
     // Use curl to avoid adding an HTTP client dependency (reqwest is heavy)
     let mut cmd = tokio::process::Command::new("curl");
     cmd.arg("-s")
-        .arg("-X").arg("POST")
-        .arg("-H").arg("Content-Type: application/json")
-        .arg("-m").arg(config.timeout.as_secs().to_string())
-        .arg("--max-time").arg(config.timeout.as_secs().to_string());
+        .arg("-X")
+        .arg("POST")
+        .arg("-H")
+        .arg("Content-Type: application/json")
+        .arg("-m")
+        .arg(config.timeout.as_secs().to_string())
+        .arg("--max-time")
+        .arg(config.timeout.as_secs().to_string());
 
     if let Some(ref token) = config.token {
         cmd.arg("-H").arg(format!("Authorization: Bearer {token}"));
@@ -126,7 +123,11 @@ pub async fn send_hook(config: &HookConfig, event: &HookEvent) {
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("⚠️  Hook: {event_name} failed ({}): {}", output.status, stderr.trim());
+            eprintln!(
+                "⚠️  Hook: {event_name} failed ({}): {}",
+                output.status,
+                stderr.trim()
+            );
         }
         Err(e) => {
             eprintln!("⚠️  Hook: {event_name} send error: {e}");
