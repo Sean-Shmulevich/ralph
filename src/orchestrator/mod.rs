@@ -275,6 +275,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let mut iteration: u32 = 1;
     let mut consecutive_failures: u32 = 0;
 
+    // Agent fallback: track per-task failures to try different agents on retry.
+    // After the primary agent fails on a task, we try the next available fallback.
+    const FALLBACK_ORDER: &[&str] = &["codex", "gemini", "claude", "opencode"];
+    let mut task_fail_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut active_agent: Box<dyn Agent> = agent;
+    let mut active_agent_name: String = args.agent.clone();
+
     // ── Main loop ─────────────────────────────────────────────────────────────
     loop {
         // Check cancellation flag (set by SIGINT/SIGTERM or `ralph stop`)
@@ -446,7 +453,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
         // Spawn agent with timeout + stall detection
         let iter_result = run_iteration(
-            agent.as_ref(),
+            active_agent.as_ref(),
             &prompt,
             &workdir,
             &log_path,
@@ -626,6 +633,55 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     None,
                 )
                 .await;
+            }
+        }
+
+        // ── Agent fallback: swap to a different agent after a failure ──────────
+        if consecutive_failures > 0 {
+            task_fail_count
+                .entry(task.id.clone())
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+
+            // Find the next fallback agent that isn't the current one and is available
+            for &candidate in FALLBACK_ORDER {
+                if candidate == active_agent_name {
+                    continue;
+                }
+                if let Ok(new_agent) = create_agent(candidate, args.model.clone(), args.api_url.clone(), args.api_key.clone()) {
+                    if new_agent.is_available() {
+                        let old_name = active_agent_name.clone();
+                        active_agent = new_agent;
+                        active_agent_name = candidate.to_string();
+                        if !is_watch_mode {
+                            eprintln!(
+                                "    🔄  Falling back from {} → {} for task {}",
+                                old_name, candidate, task.id
+                            );
+                        }
+                        state.append_progress(&format!(
+                            "Agent fallback: {} → {} for task {}",
+                            old_name, candidate, task.id
+                        ))?;
+                        break;
+                    }
+                }
+            }
+
+            // If task succeeds on retry, reset back to primary agent
+        } else {
+            // Success — reset to primary agent if we had fallen back
+            if active_agent_name != args.agent {
+                if let Ok(primary) = create_agent(&args.agent, args.model.clone(), args.api_url.clone(), args.api_key.clone()) {
+                    if !is_watch_mode {
+                        eprintln!(
+                            "    🔄  Task succeeded — switching back to primary agent ({})",
+                            args.agent
+                        );
+                    }
+                    active_agent = primary;
+                    active_agent_name = args.agent.clone();
+                }
             }
         }
 
