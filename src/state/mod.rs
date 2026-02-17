@@ -306,16 +306,81 @@ impl StateManager {
     // ── Lock file ─────────────────────────────────────────────────────────────
 
     /// Write (or overwrite) the lock file with current run metadata.
+    /// Also registers in the global registry (~/.ralph/active/) so `ralph status`
+    /// can find loops running in any directory.
     pub fn write_lock(&self, lock: &LockFile) -> Result<()> {
         let content =
             serde_json::to_string_pretty(lock).context("Failed to serialise lock file")?;
         fs::write(&self.lock_file, content).context("Failed to write .ralph/lock")?;
+        self.register_global(lock.pid);
         Ok(())
     }
 
     /// Remove the lock file (called on clean exit).
+    /// Also deregisters from the global registry.
     pub fn remove_lock(&self) {
+        if let Ok(content) = fs::read_to_string(&self.lock_file) {
+            if let Ok(lock) = serde_json::from_str::<LockFile>(&content) {
+                Self::deregister_global(lock.pid);
+            }
+        }
         let _ = fs::remove_file(&self.lock_file);
+    }
+
+    /// Global registry directory: ~/.ralph/active/
+    fn global_registry_dir() -> Option<std::path::PathBuf> {
+        dirs::home_dir().map(|h| h.join(".ralph").join("active"))
+    }
+
+    /// Register this lock file in the global registry as a symlink.
+    fn register_global(&self, pid: u32) {
+        if let Some(dir) = Self::global_registry_dir() {
+            let _ = fs::create_dir_all(&dir);
+            let link = dir.join(format!("{}.lock", pid));
+            // Remove stale link if exists
+            let _ = fs::remove_file(&link);
+            #[cfg(unix)]
+            {
+                let _ = std::os::unix::fs::symlink(&self.lock_file, &link);
+            }
+        }
+    }
+
+    /// Deregister from the global registry.
+    fn deregister_global(pid: u32) {
+        if let Some(dir) = Self::global_registry_dir() {
+            let link = dir.join(format!("{}.lock", pid));
+            let _ = fs::remove_file(&link);
+        }
+    }
+
+    /// Find all active locks system-wide by reading the global registry.
+    pub fn find_all_global_locks() -> Vec<(std::path::PathBuf, LockFile)> {
+        let Some(dir) = Self::global_registry_dir() else {
+            return Vec::new();
+        };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut results = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Resolve symlink to actual lock file
+            let real_path = match fs::canonicalize(&path) {
+                Ok(p) => p,
+                Err(_) => {
+                    // Dangling symlink — clean it up
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+            };
+            if let Ok(content) = fs::read_to_string(&real_path) {
+                if let Ok(lock) = serde_json::from_str::<LockFile>(&content) {
+                    results.push((real_path, lock));
+                }
+            }
+        }
+        results
     }
 
     /// Read the lock file, if it exists.

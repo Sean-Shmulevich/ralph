@@ -559,26 +559,36 @@ fn print_doctor_table(rows: &[DoctorRow]) {
 async fn show_status(args: cli::StatusArgs) -> Result<()> {
     use std::path::PathBuf;
 
-    let workdir: PathBuf = args
-        .workdir
-        .unwrap_or_else(|| PathBuf::from("."))
-        .canonicalize()
-        .context("Cannot resolve workdir — does it exist?")?;
-
-    // In status command, we check for both .ralph/ and .ralph-*/ locks
-    // to give a complete picture.
-
-    let locks = find_active_locks(&workdir).await?;
+    // If --workdir is given, scan that directory only (old behavior).
+    // Otherwise, scan the global registry for loops running anywhere.
+    let (locks, scope_label) = if let Some(ref wd) = args.workdir {
+        let workdir = wd.canonicalize().context("Cannot resolve workdir")?;
+        let local_locks = find_active_locks(&workdir).await?;
+        (local_locks, format!("in {}", workdir.display()))
+    } else {
+        let global = state::StateManager::find_all_global_locks();
+        // Also check cwd for loops that might predate the global registry
+        let cwd = PathBuf::from(".").canonicalize().unwrap_or_default();
+        let mut locks = global;
+        let local = find_active_locks(&cwd).await.unwrap_or_default();
+        // Merge, dedup by PID
+        for (path, lock) in local {
+            if !locks.iter().any(|(_, l)| l.pid == lock.pid) {
+                locks.push((path, lock));
+            }
+        }
+        (locks, "system-wide".to_string())
+    };
 
     if locks.is_empty() {
-        println!("💤  No ralph loops running in {}", workdir.display());
+        println!("💤  No ralph loops running {scope_label}");
         return Ok(());
     }
 
     println!(
-        "🟢  {} active loop(s) in {}\n",
+        "🟢  {} active loop(s) {}\n",
         locks.len(),
-        workdir.display()
+        scope_label
     );
 
     for (path, lock) in locks {
@@ -603,7 +613,15 @@ async fn show_status(args: cli::StatusArgs) -> Result<()> {
         let alive = is_pid_alive(lock.pid);
         let status_icon = if alive { "🟢" } else { "💀" };
 
+        // Derive project directory from lock path: /project/.ralph/lock → /project/
+        let project_dir = path
+            .parent()  // .ralph/
+            .and_then(|p| p.parent())  // project dir
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "?".to_string());
+
         println!("    {status_icon} [{}] PID {}", loop_name, lock.pid);
+        println!("       Dir:      {}", project_dir);
         println!("       PRD:      {}", lock.prd_path);
         println!("       Agent:    {}", lock.agent);
         println!("       Task:     {}", lock.current_task);

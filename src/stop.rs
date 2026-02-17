@@ -7,6 +7,11 @@ use crate::cli::StopArgs;
 use crate::state::LockFile;
 
 pub async fn stop_loops(args: StopArgs) -> Result<()> {
+    if args.all && args.workdir.is_none() {
+        // Stop all loops system-wide via global registry
+        return stop_all_global().await;
+    }
+
     let workdir = resolve_workdir(args.workdir.as_deref())?;
 
     if args.all {
@@ -34,6 +39,20 @@ async fn stop_named(workdir: &Path, name: Option<&str>) -> Result<()> {
 
     let lock = read_lock(&lock_path)?;
     send_sigterm_to_lock(&lock, &lock_path)?;
+    Ok(())
+}
+
+/// Stop all loops system-wide using the global registry.
+async fn stop_all_global() -> Result<()> {
+    let locks = crate::state::StateManager::find_all_global_locks();
+    if locks.is_empty() {
+        println!("💤  No running ralph loops found system-wide");
+        return Ok(());
+    }
+    println!("🛑  Stopping {} loop(s) system-wide…", locks.len());
+    for (lock_path, lock) in &locks {
+        let _ = send_sigterm_to_lock(lock, lock_path);
+    }
     Ok(())
 }
 
