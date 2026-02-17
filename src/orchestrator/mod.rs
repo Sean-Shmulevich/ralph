@@ -153,7 +153,22 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     existing.tasks.len()
                 );
             }
-            existing
+            // Reset any in_progress tasks back to pending (interrupted previous run)
+            let mut fixed = existing;
+            let mut reset_count = 0;
+            for task in &mut fixed.tasks {
+                if task.status == TaskStatus::InProgress {
+                    task.status = TaskStatus::Pending;
+                    reset_count += 1;
+                }
+            }
+            if reset_count > 0 {
+                if !is_watch_mode {
+                    println!("⚠️  Reset {reset_count} interrupted task(s) back to pending");
+                }
+                state.save_tasks(&fixed)?;
+            }
+            fixed
         }
         None => {
             if !is_watch_mode {
