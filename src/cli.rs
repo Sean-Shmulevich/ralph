@@ -78,6 +78,14 @@ pub struct RunArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Webhook URL to POST events to (task complete, failures, etc.)
+    #[arg(long)]
+    pub hook_url: Option<String>,
+
+    /// Bearer token for webhook authentication
+    #[arg(long)]
+    pub hook_token: Option<String>,
+
     // ── Internal fields set programmatically by `ralph watch` ─────────────────
 
     /// Name override for the state directory.
@@ -160,6 +168,14 @@ pub struct WatchArgs {
     /// Disable the TUI dashboard (plain progress output)
     #[arg(long)]
     pub no_tui: bool,
+
+    /// Webhook URL to POST events to
+    #[arg(long)]
+    pub hook_url: Option<String>,
+
+    /// Bearer token for webhook authentication
+    #[arg(long)]
+    pub hook_token: Option<String>,
 
     /// Stream agent output to terminal (only useful with --no-tui)
     #[arg(long, short)]

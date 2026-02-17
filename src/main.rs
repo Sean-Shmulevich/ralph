@@ -1,6 +1,7 @@
 mod agents;
 mod cli;
 mod git;
+mod hooks;
 mod logs;
 mod orchestrator;
 mod parser;

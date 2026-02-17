@@ -10,6 +10,7 @@ use tokio::time::Duration;
 use crate::agents::{create_agent, Agent};
 use crate::cli::RunArgs;
 use crate::git::GitManager;
+use crate::hooks::{self, HookConfig, HookEvent, Progress};
 use crate::parser::parse_prd;
 use crate::state::{
     LockFile, LoopState, SharedLoopStatus, StateManager, Task, TaskList, TaskStatus,
@@ -78,6 +79,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let agent = create_agent(&args.agent, args.model.clone())?;
 
     let is_watch_mode = args.state_name.is_some();
+
+    // Set up webhook hook if configured
+    let hook = args.hook_url.as_ref().map(|url| {
+        HookConfig::new(url.clone(), args.hook_token.clone())
+    });
 
     if !is_watch_mode {
         // Interactive `ralph run` — print startup banner
@@ -225,6 +231,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     args.max_iterations
                 );
             }
+            fire_hook(&hook, HookEvent::MaxIterations {
+                max_iterations: args.max_iterations,
+                progress: make_progress(&task_list),
+            }).await;
             update_loop_state(&args.loop_status, LoopState::Stopped);
             break;
         }
@@ -240,6 +250,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 "**STOPPED** — circuit breaker after {} consecutive failures (iteration {}).",
                 args.max_failures, iteration
             ))?;
+            fire_hook(&hook, HookEvent::CircuitBreaker {
+                consecutive_failures,
+                last_error: "Too many consecutive failures".to_string(),
+                progress: make_progress(&task_list),
+            }).await;
             update_loop_state(
                 &args.loop_status,
                 LoopState::Failed(format!("{} consecutive failures", args.max_failures)),
@@ -255,6 +270,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     println!("\n✅  All tasks complete! PRD implementation finished.");
                 }
                 state.append_progress("**COMPLETE** — all tasks finished successfully.")?;
+                fire_hook(&hook, HookEvent::AllComplete {
+                    total_tasks: task_list.tasks.len() as u32,
+                    total_iterations: iteration - 1,
+                    total_duration_secs: 0,
+                    summary: format!("All {} tasks completed in {} iterations", task_list.tasks.len(), iteration - 1),
+                    progress: make_progress(&task_list),
+                }).await;
                 update_loop_state(&args.loop_status, LoopState::Complete);
                 break;
             }
@@ -381,6 +403,17 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         task.id, task.title, iteration
                     ))?;
 
+                    // Fire webhook
+                    fire_hook(&hook, HookEvent::TaskComplete {
+                        task_id: task.id.clone(),
+                        task_title: task.title.clone(),
+                        iteration,
+                        duration_secs: 0, // TODO: track per-iteration timing
+                        files_changed: vec![],
+                        summary: format!("Task {} — {} completed in iteration {}", task.id, task.title, iteration),
+                        progress: make_progress(&task_list),
+                    }).await;
+
                     // Auto-commit if there are changes
                     if !args.no_branch && git.is_git_repo().await {
                         match git.has_changes().await {
@@ -428,6 +461,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
                         "**Iteration {} — Task {} incomplete**\n\nConsecutive failures: {}/{}",
                         iteration, task.id, consecutive_failures, args.max_failures
                     ))?;
+
+                    fire_hook(&hook, HookEvent::TaskFailed {
+                        task_id: task.id.clone(),
+                        task_title: task.title.clone(),
+                        iteration,
+                        duration_secs: 0,
+                        error: "Task not completed this iteration".to_string(),
+                        consecutive_failures,
+                        progress: make_progress(&task_list),
+                    }).await;
                 }
             }
 
@@ -446,6 +489,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     "**Iteration {} FAILED** — Task {} error: {e}\n\nConsecutive failures: {}/{}",
                     iteration, task.id, consecutive_failures, args.max_failures
                 ))?;
+
+                fire_hook(&hook, HookEvent::TaskFailed {
+                    task_id: task.id.clone(),
+                    task_title: task.title.clone(),
+                    iteration,
+                    duration_secs: 0,
+                    error: format!("{e}"),
+                    consecutive_failures,
+                    progress: make_progress(&task_list),
+                }).await;
             }
         }
 
@@ -457,6 +510,26 @@ pub async fn run(args: RunArgs) -> Result<()> {
         print_task_table(&task_list);
     }
     Ok(())
+}
+
+// ── Hook helpers ──────────────────────────────────────────────────────────────
+
+fn make_progress(task_list: &TaskList) -> Progress {
+    let completed = task_list.tasks.iter().filter(|t| t.status == TaskStatus::Complete).count() as u32;
+    let failed = task_list.tasks.iter().filter(|t| t.status == TaskStatus::Failed).count() as u32;
+    let total = task_list.tasks.len() as u32;
+    Progress {
+        completed,
+        failed,
+        remaining: total - completed - failed,
+        total,
+    }
+}
+
+async fn fire_hook(hook: &Option<HookConfig>, event: HookEvent) {
+    if let Some(ref config) = hook {
+        hooks::send_hook(config, &event).await;
+    }
 }
 
 // ── Helpers for shared status ─────────────────────────────────────────────────
@@ -971,6 +1044,8 @@ fi
             no_branch: true,
             verbose: false,
             dry_run: false,
+            hook_url: None,
+            hook_token: None,
             state_name: None,
             loop_status: None,
             cancel_flag: None,

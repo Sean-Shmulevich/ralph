@@ -232,6 +232,8 @@ fn build_run_args(
         // Never print verbose output in watch mode — logs go to files + TUI buffer
         verbose: false,
         dry_run: false,
+        hook_url: watch_args.hook_url.clone(),
+        hook_token: watch_args.hook_token.clone(),
         state_name: Some(slug.to_string()),
         loop_status: Some(loop_status),
         cancel_flag: Some(cancel_flag.clone()),
