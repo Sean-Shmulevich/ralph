@@ -1,11 +1,9 @@
 //! OpenClaw notification integration.
 //!
-//! When `--notify <channel>:<target>` is set, Ralph POSTs events to the local
-//! OpenClaw gateway's `/hooks/agent` endpoint, which delivers formatted messages
-//! to the specified channel (e.g. Discord, Telegram).
-//!
-//! On failure/circuit-breaker events, the message includes the last N lines of
-//! the agent log and asks OpenClaw to analyze what went wrong.
+//! When `--notify <channel>:<target>` is set, Ralph sends progress messages
+//! directly to the specified chat channel via OpenClaw's `/tools/invoke` API,
+//! calling the `message` tool. No AI middleman — messages are delivered exactly
+//! as formatted.
 
 use crate::hooks::HookEvent;
 use std::path::Path;
@@ -13,8 +11,8 @@ use std::path::Path;
 /// Parsed notify target (e.g. `discord:1234567890`).
 #[derive(Debug, Clone)]
 pub struct NotifyTarget {
-    pub channel: String,  // "discord", "telegram", etc.
-    pub to: String,       // channel id or recipient
+    pub channel: String, // "discord", "telegram", etc.
+    pub to: String,      // channel id or recipient
 }
 
 impl NotifyTarget {
@@ -40,8 +38,8 @@ impl NotifyTarget {
 pub struct NotifyConfig {
     /// OpenClaw gateway base URL (e.g. `http://127.0.0.1:18789`).
     pub gateway_url: String,
-    /// Hooks bearer token.
-    pub hooks_token: String,
+    /// Gateway auth token.
+    pub gateway_token: String,
     /// Where to deliver.
     pub target: NotifyTarget,
     /// PRD name for context in messages.
@@ -50,12 +48,13 @@ pub struct NotifyConfig {
 
 impl NotifyConfig {
     /// Build from env vars + CLI flag.
-    /// Returns None if env vars aren't set.
+    /// Tries OPENCLAW_GATEWAY_TOKEN, then OPENCLAW_TOKEN, then OPENCLAW_HOOKS_TOKEN.
     pub fn from_env(notify_flag: &str, prd_name: &str) -> Option<Self> {
         let target = NotifyTarget::parse(notify_flag)?;
 
-        let hooks_token = std::env::var("OPENCLAW_HOOKS_TOKEN")
+        let gateway_token = std::env::var("OPENCLAW_GATEWAY_TOKEN")
             .or_else(|_| std::env::var("OPENCLAW_TOKEN"))
+            .or_else(|_| std::env::var("OPENCLAW_HOOKS_TOKEN"))
             .ok()?;
 
         let gateway_url = std::env::var("OPENCLAW_URL")
@@ -63,7 +62,7 @@ impl NotifyConfig {
 
         Some(Self {
             gateway_url,
-            hooks_token,
+            gateway_token,
             target,
             prd_name: prd_name.to_string(),
         })
@@ -97,10 +96,11 @@ fn format_event(config: &NotifyConfig, event: &HookEvent, log_tail: Option<&str>
             ..
         } => {
             let mut msg = format!(
-                "❌ **{task_id}** — {task_title} failed (iter {iteration}, {consecutive_failures} consecutive)\n📊 `[{prd}]` {}/{} done\nError: {error}"
-            , progress.completed, progress.total);
+                "❌ **{task_id}** — {task_title} failed (iter {iteration}, {consecutive_failures} consecutive)\n📊 `[{prd}]` {}/{} done\nError: {}",
+                progress.completed, progress.total, truncate(error, 200)
+            );
             if let Some(tail) = log_tail {
-                msg.push_str(&format!("\n\n**Last log lines:**\n```\n{tail}\n```"));
+                msg.push_str(&format!("\n```\n{}\n```", truncate(tail, 500)));
             }
             msg
         }
@@ -108,7 +108,6 @@ fn format_event(config: &NotifyConfig, event: &HookEvent, log_tail: Option<&str>
             total_tasks,
             total_iterations,
             total_duration_secs,
-            progress: _,
             ..
         } => {
             let mins = total_duration_secs / 60;
@@ -123,11 +122,11 @@ fn format_event(config: &NotifyConfig, event: &HookEvent, log_tail: Option<&str>
             progress,
         } => {
             let mut msg = format!(
-                "⚠️ **Circuit breaker triggered** — {consecutive_failures} consecutive failures\n📊 `[{prd}]` {}/{} done\nLast error: {last_error}",
-                progress.completed, progress.total
+                "⚠️ **Circuit breaker triggered** — {consecutive_failures} consecutive failures\n📊 `[{prd}]` {}/{} done\nLast error: {}",
+                progress.completed, progress.total, truncate(last_error, 200)
             );
             if let Some(tail) = log_tail {
-                msg.push_str(&format!("\n\n**Last log lines:**\n```\n{tail}\n```"));
+                msg.push_str(&format!("\n```\n{}\n```", truncate(tail, 500)));
             }
             msg
         }
@@ -143,6 +142,15 @@ fn format_event(config: &NotifyConfig, event: &HookEvent, log_tail: Option<&str>
     }
 }
 
+/// Truncate a string to max_len chars, adding "…" if truncated.
+fn truncate(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        s
+    } else {
+        &s[..max_len]
+    }
+}
+
 /// Read the last N lines from a log file.
 fn read_log_tail(log_path: &Path, lines: usize) -> Option<String> {
     let content = std::fs::read_to_string(log_path).ok()?;
@@ -151,8 +159,8 @@ fn read_log_tail(log_path: &Path, lines: usize) -> Option<String> {
     Some(all_lines[start..].join("\n"))
 }
 
-/// Send a notification to OpenClaw.
-/// For failure events, includes the last 20 lines of the iteration log.
+/// Send a notification to OpenClaw via /tools/invoke → message tool.
+/// Direct delivery — no AI middleman, message arrives exactly as formatted.
 pub async fn send_notify(
     config: &NotifyConfig,
     event: &HookEvent,
@@ -161,44 +169,30 @@ pub async fn send_notify(
     // For failure events, grab log tail
     let log_tail = match event {
         HookEvent::TaskFailed { .. } | HookEvent::CircuitBreaker { .. } => {
-            log_path.and_then(|p| read_log_tail(p, 20))
+            log_path.and_then(|p| read_log_tail(p, 15))
         }
         _ => None,
     };
 
     let message = format_event(config, event, log_tail.as_deref());
 
-    // For failure/stop events, ask OpenClaw to analyze and relay
-    let is_failure = matches!(
-        event,
-        HookEvent::TaskFailed { .. }
-            | HookEvent::CircuitBreaker { .. }
-            | HookEvent::MaxIterations { .. }
-    );
-
-    let agent_message = if is_failure {
-        format!(
-            "Ralph CLI notification — relay this message to the user and briefly analyze the failure (1-2 sentences):\n\n{message}"
-        )
-    } else {
-        format!("Ralph CLI notification — relay this exactly to the user:\n\n{message}")
-    };
-
-    // Build the /hooks/agent payload
-    let mut payload = serde_json::json!({
-        "message": agent_message,
-        "name": "Ralph",
-        "deliver": true,
+    // Build the /tools/invoke payload for the message tool
+    let mut msg_args = serde_json::json!({
+        "action": "send",
         "channel": config.target.channel,
-        "model": "anthropic/claude-haiku-4-5",
-        "timeoutSeconds": 30,
+        "message": message,
     });
 
     if !config.target.to.is_empty() {
-        payload["to"] = serde_json::Value::String(config.target.to.clone());
+        msg_args["target"] = serde_json::Value::String(config.target.to.clone());
     }
 
-    let url = format!("{}/hooks/agent", config.gateway_url);
+    let payload = serde_json::json!({
+        "tool": "message",
+        "args": msg_args,
+    });
+
+    let url = format!("{}/tools/invoke", config.gateway_url);
     let body = serde_json::to_string(&payload).unwrap_or_default();
 
     let mut cmd = tokio::process::Command::new("curl");
@@ -208,22 +202,31 @@ pub async fn send_notify(
         .arg("-H")
         .arg("Content-Type: application/json")
         .arg("-H")
-        .arg(format!("Authorization: Bearer {}", config.hooks_token))
+        .arg(format!("Authorization: Bearer {}", config.gateway_token))
         .arg("-m")
         .arg("15")
         .arg("-d")
         .arg(&body)
         .arg(&url)
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
     match cmd.output().await {
         Ok(output) if output.status.success() => {
-            eprintln!("🔔  Notify: sent to {}:{}", config.target.channel, config.target.to);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("\"ok\":true") {
+                eprintln!("🔔  Notify: sent to {}:{}", config.target.channel, config.target.to);
+            } else {
+                eprintln!("⚠️  Notify: gateway responded but message may not have delivered: {}", stdout.chars().take(200).collect::<String>());
+            }
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("⚠️  Notify: failed ({}): {}", output.status, stderr.trim());
+            eprintln!(
+                "⚠️  Notify: failed ({}): {}",
+                output.status,
+                stderr.trim()
+            );
         }
         Err(e) => {
             eprintln!("⚠️  Notify: send error: {e}");
