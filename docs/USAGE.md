@@ -45,11 +45,13 @@ You also need at least one agent CLI installed. Run `ralph doctor` to check whic
 
 ### Fallback Order
 
-When an agent fails a task, Ralph automatically tries the next agent in fallback order:
+When an agent fails a task, Ralph automatically tries the next available agent:
 
 ```
-codex → gemini → api → claude → opencode
+codex → gemini → claude → opencode
 ```
+
+> **Note:** The API agent is not in the fallback chain (it can't edit files). Use it explicitly with `--agent api` for parsing or text-only tasks.
 
 ---
 
@@ -59,11 +61,12 @@ Ralph can send real-time progress updates to Discord or Telegram via an OpenClaw
 
 ### Setup
 
-1. Get your OpenClaw hooks token (from your gateway config or `openclaw status`)
+1. Get your OpenClaw gateway token (from your gateway config or `openclaw status`)
 2. Set it as an environment variable:
 
 ```bash
-export OPENCLAW_HOOKS_TOKEN="your-hooks-token-here"
+# Preferred (tries in order: OPENCLAW_GATEWAY_TOKEN → OPENCLAW_TOKEN → OPENCLAW_HOOKS_TOKEN)
+export OPENCLAW_GATEWAY_TOKEN="your-gateway-token-here"
 ```
 
 3. Use the `--notify` flag with `channel:target_id` format:
@@ -79,9 +82,9 @@ ralph run prd.md --agent codex --notify telegram:5979047659
 ### What Gets Notified
 
 - ✅ Task completed successfully
-- ❌ Task failed (with failure count)
-- 🛑 Circuit breaker triggered (3+ consecutive failures)
-- 🏁 All tasks completed
+- ❌ Task failed (with failure count + log tail)
+- ⚠️ Circuit breaker triggered (consecutive failures hit limit)
+- 🎉 All tasks completed
 - ⚠️ Max iterations reached
 
 ### Combining with Webhooks
@@ -113,13 +116,15 @@ ralph run prd.md --agent codex --notify discord:CHANNEL_ID
 
 ### 2. Redundant Multi-Agent (fallback on failure)
 
-Start with Codex; if it fails 3 times, Ralph falls back to Gemini, then API, then Claude:
+Start with Codex; if it fails on a task, Ralph tries Gemini, then Claude, then OpenCode:
 
 ```bash
 ralph run prd.md --agent codex --max-failures 3 --notify discord:CHANNEL_ID
 ```
 
-This is the default behavior — Ralph tries the next agent automatically.
+Fallback is per-task, not global. The circuit breaker (`--max-failures`) still counts consecutive failures across all agents.
+
+> **Important:** The CLI default agent is `claude`, not `codex`. Always pass `--agent codex` explicitly if you want Codex first.
 
 ### 3. Fast Iteration with Short Stall Timeout
 
@@ -255,7 +260,7 @@ stall_timeout = 60
 max_failures = 3
 ```
 
-Set `OPENCLAW_HOOKS_TOKEN` in your shell profile and use `--notify` per-run.
+Set `OPENCLAW_GATEWAY_TOKEN` in your shell profile and use `--notify` per-run.
 
 ---
 
