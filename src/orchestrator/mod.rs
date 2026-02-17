@@ -1032,7 +1032,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::process::Stdio;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
     use tokio::process::Command;
     use tokio::time::Instant;
@@ -1142,11 +1141,6 @@ mod tests {
         assert!(stdout.contains("<promise>COMPLETE</promise>"));
     }
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     fn write_fake_codex(workdir: &Path) -> std::path::PathBuf {
         let bin_dir = workdir.join("bin");
         fs::create_dir_all(&bin_dir).expect("create bin dir");
@@ -1176,6 +1170,15 @@ fi
             .permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&codex_path, perms).expect("chmod fake codex");
+
+        // Create identical stubs for all fallback agents so tests don't hit real binaries
+        for name in &["gemini", "claude", "opencode"] {
+            let p = bin_dir.join(name);
+            fs::copy(&codex_path, &p).expect(&format!("copy fake {name}"));
+            let mut pm = fs::metadata(&p).expect("stat").permissions();
+            pm.set_mode(0o755);
+            fs::set_permissions(&p, pm).expect("chmod");
+        }
 
         bin_dir
     }
