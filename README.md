@@ -1,21 +1,14 @@
 # Ralph — Autonomous AI Agent for Software Development
 
-[![crates.io](https://img.shields.io/crates/v/ralph-loop.svg)](https://crates.io/crates/ralph-loop)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Ralph is an autonomous AI agent that reads a PRD, extracts tasks, and implements them iteratively until completion.
+Ralph is an autonomous AI agent that reads a PRD, extracts tasks, and implements them iteratively until completion. Each iteration spawns a fresh agent with clean context, avoiding context rot.
+
+Supports multiple agents (Codex, Gemini, Claude, OpenCode) with automatic fallback on failure, and optional real-time notifications via [OpenClaw](https://openclaw.ai).
 
 ---
 
 ## Installation
-
-### From crates.io
-
-Install Ralph directly from crates.io:
-
-```bash
-cargo install ralph-loop
-```
 
 ### Build from source
 
@@ -80,7 +73,7 @@ Runs the autonomous agent loop to implement tasks from the specified PRD.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--agent` | `claude` | Agent backend to use (e.g., `claude`, `gemini`, `codex`, `opencode`) |
+| `--agent` | `codex` | Agent backend to use (`codex`, `gemini`, `claude`, `opencode`, `api`) |
 | `--model MODEL` | agent default | Specific model override for the agent |
 | `--max-iterations N` | `20` | Hard cap on the number of agent iterations |
 | `--timeout SECS` | `600` | Per-iteration wall-clock timeout in seconds |
@@ -92,6 +85,11 @@ Runs the autonomous agent loop to implement tasks from the specified PRD.
 | `--verbose` | — | Stream agent output to the terminal for debugging |
 | `--dry-run` | — | Parse PRD, print tasks, and exit without running the loop |
 | `--parse-timeout` | `120` | Timeout for the PRD parsing phase in seconds |
+| `--notify` | — | OpenClaw notifications (`discord:CHANNEL_ID` or `telegram:CHAT_ID`) |
+| `--hook-url` | — | Generic webhook URL for event POSTs |
+| `--hook-token` | — | Bearer token for webhook auth |
+| `--api-url` | anthropic | Base URL for API agent (e.g. `http://localhost:3456` for Max proxy) |
+| `--api-key` | env | API key for API agent (default: `ANTHROPIC_API_KEY` env var) |
 
 ### `ralph doctor`
 

@@ -39,7 +39,7 @@ pub struct RunArgs {
     pub prd: PathBuf,
 
     /// Agent to use (claude, gemini, codex)
-    #[arg(long, default_value = "claude")]
+    #[arg(long, default_value = "codex")]
     pub agent: String,
 
     /// Model override passed to the agent binary
@@ -128,7 +128,7 @@ pub struct ParseArgs {
     pub prd: PathBuf,
 
     /// Agent to use for parsing
-    #[arg(long, default_value = "claude")]
+    #[arg(long, default_value = "codex")]
     pub agent: String,
 
     /// Model override passed to the agent binary
@@ -162,7 +162,7 @@ pub struct WatchArgs {
     pub parallel: Option<usize>,
 
     /// Agent to use for all loops
-    #[arg(long, default_value = "claude")]
+    #[arg(long, default_value = "codex")]
     pub agent: String,
 
     /// Model override passed to the agent binary
