@@ -1,10 +1,12 @@
 mod claude;
 mod codex;
 mod gemini;
+mod opencode;
 
 pub use claude::ClaudeAgent;
 pub use codex::CodexAgent;
 pub use gemini::GeminiAgent;
+pub use opencode::OpenCodeAgent;
 
 use anyhow::Result;
 use std::path::Path;
@@ -37,8 +39,9 @@ pub fn create_agent(name: &str, model: Option<String>) -> Result<Box<dyn Agent>>
         "claude" => Ok(Box::new(ClaudeAgent::new(model))),
         "gemini" => Ok(Box::new(GeminiAgent::new(model))),
         "codex" => Ok(Box::new(CodexAgent::new(model))),
+        "opencode" => Ok(Box::new(OpenCodeAgent::new(model))),
         other => anyhow::bail!(
-            "Unknown agent '{}'. Supported agents: claude, gemini, codex",
+            "Unknown agent '{}'. Supported agents: claude, gemini, codex, opencode",
             other
         ),
     }
