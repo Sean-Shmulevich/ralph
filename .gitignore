@@ -1,4 +1,7 @@
-/target/
+/target
 .ralph/
-ralph.toml
-*.log
+.ralph-*/
+*.swp
+*.swo
+*~
+.DS_Store
