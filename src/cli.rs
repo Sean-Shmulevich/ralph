@@ -31,12 +31,52 @@ pub enum Commands {
     Logs(LogsArgs),
     /// Gracefully stop a running loop (or all loops)
     Stop(StopArgs),
+    /// Manage reusable PRD templates
+    Template(TemplateArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct TemplateArgs {
+    #[command(subcommand)]
+    pub command: TemplateCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TemplateCommands {
+    /// Save a PRD file as a reusable template
+    Save {
+        /// Template name (e.g. "code-review")
+        name: String,
+        /// Path to the PRD markdown file to save
+        prd: PathBuf,
+    },
+    /// List all saved templates
+    List {
+        /// Show full descriptions (not just names)
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Show the full content of a template
+    Show {
+        /// Template name
+        name: String,
+    },
+    /// Remove a saved template
+    Remove {
+        /// Template name
+        name: String,
+    },
 }
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
-    /// Path to the PRD markdown file
-    pub prd: PathBuf,
+    /// Path to the PRD markdown file (or use --template)
+    #[arg(required_unless_present = "template")]
+    pub prd: Option<PathBuf>,
+
+    /// Use a saved template instead of a PRD file (see: ralph template list)
+    #[arg(long, conflicts_with = "prd")]
+    pub template: Option<String>,
 
     /// Agent to use (claude, gemini, codex)
     #[arg(long, default_value = "codex")]
@@ -124,8 +164,13 @@ pub struct RunArgs {
 
 #[derive(Args, Debug)]
 pub struct ParseArgs {
-    /// Path to the PRD markdown file
-    pub prd: PathBuf,
+    /// Path to the PRD markdown file (or use --template)
+    #[arg(required_unless_present = "template")]
+    pub prd: Option<PathBuf>,
+
+    /// Use a saved template instead of a PRD file
+    #[arg(long, conflicts_with = "prd")]
+    pub template: Option<String>,
 
     /// Agent to use for parsing
     #[arg(long, default_value = "codex")]
@@ -262,7 +307,7 @@ mod tests {
 
         match cli.command {
             Commands::Run(args) => {
-                assert_eq!(args.prd, PathBuf::from("prd.md"));
+                assert_eq!(args.prd, Some(PathBuf::from("prd.md")));
             }
             _ => panic!("expected run command"),
         }
@@ -309,7 +354,7 @@ mod tests {
 
         match cli.command {
             Commands::Run(args) => {
-                assert_eq!(args.prd, PathBuf::from("prd.md"));
+                assert_eq!(args.prd, Some(PathBuf::from("prd.md")));
                 assert_eq!(args.agent, "gemini");
                 assert_eq!(args.max_iterations, 5);
                 assert_eq!(args.timeout, 300);
@@ -326,7 +371,7 @@ mod tests {
 
         match cli.command {
             Commands::Parse(args) => {
-                assert_eq!(args.prd, PathBuf::from("prd.md"));
+                assert_eq!(args.prd, Some(PathBuf::from("prd.md")));
                 assert_eq!(args.parse_timeout, 30);
             }
             _ => panic!("expected parse command"),

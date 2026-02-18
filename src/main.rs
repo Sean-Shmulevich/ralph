@@ -10,6 +10,7 @@ mod parser;
 mod state;
 mod stop;
 mod tui;
+mod templates;
 mod watch;
 
 use std::path::{Path, PathBuf};
@@ -39,12 +40,14 @@ async fn main() -> Result<()> {
             run_doctor(args).await?;
         }
         Commands::Run(mut args) => {
+            resolve_prd_or_template(&mut args.prd, &args.template)?;
             if let Some(run_matches) = matches.subcommand_matches("run") {
                 apply_run_config(&mut args, config.as_ref(), run_matches);
             }
             orchestrator::run(args).await?;
         }
         Commands::Parse(mut args) => {
+            resolve_prd_or_template(&mut args.prd, &args.template)?;
             if let Some(parse_matches) = matches.subcommand_matches("parse") {
                 apply_parse_config(&mut args, config.as_ref(), parse_matches);
             }
@@ -65,8 +68,31 @@ async fn main() -> Result<()> {
         Commands::Stop(args) => {
             stop::stop_loops(args).await?;
         }
+        Commands::Template(args) => {
+            match args.command {
+                cli::TemplateCommands::Save { name, prd } => templates::save(&name, &prd)?,
+                cli::TemplateCommands::List { verbose } => templates::list(verbose)?,
+                cli::TemplateCommands::Show { name } => templates::show(&name)?,
+                cli::TemplateCommands::Remove { name } => templates::remove(&name)?,
+            }
+        }
     }
 
+    Ok(())
+}
+
+/// Resolve --template to a PRD path, or ensure prd is set.
+fn resolve_prd_or_template(
+    prd: &mut Option<std::path::PathBuf>,
+    template: &Option<String>,
+) -> anyhow::Result<()> {
+    if let Some(name) = template {
+        let path = templates::get(name)?;
+        *prd = Some(path);
+    }
+    if prd.is_none() {
+        anyhow::bail!("Either a PRD file or --template is required");
+    }
     Ok(())
 }
 

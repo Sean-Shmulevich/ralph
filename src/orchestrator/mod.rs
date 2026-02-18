@@ -66,10 +66,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .canonicalize()
         .context("Cannot resolve workdir — does it exist?")?;
 
-    let prd_path = args
-        .prd
+    let prd_ref = args.prd.as_ref().context("No PRD file specified")?;
+    let prd_path = prd_ref
         .canonicalize()
-        .with_context(|| format!("PRD file not found: {}", args.prd.display()))?;
+        .with_context(|| format!("PRD file not found: {}", prd_ref.display()))?;
 
     // Build state manager — named variant for `ralph watch`, default for `ralph run`
     let state = match &args.state_name {
@@ -1263,7 +1263,8 @@ fi
         max_failures: u32,
     ) -> RunArgs {
         RunArgs {
-            prd: prd_path.to_path_buf(),
+            prd: Some(prd_path.to_path_buf()),
+            template: None,
             agent: "codex".to_string(),
             model: None,
             max_iterations,

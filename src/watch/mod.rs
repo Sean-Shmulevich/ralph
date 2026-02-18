@@ -231,7 +231,8 @@ fn build_run_args(
     cancel_flag: &Arc<AtomicBool>,
 ) -> RunArgs {
     RunArgs {
-        prd: prd.to_path_buf(),
+        prd: Some(prd.to_path_buf()),
+        template: None,
         agent: watch_args.agent.clone(),
         model: watch_args.model.clone(),
         max_iterations: watch_args.max_iterations,

@@ -80,8 +80,9 @@ pub async fn parse_prd(
 
 /// `ralph parse <prd.md>` entry point — parse and print (or write) tasks.
 pub async fn parse_and_print(args: ParseArgs) -> Result<()> {
+    let prd_ref = args.prd.as_ref().context("No PRD file specified")?;
     let task_list = parse_prd(
-        &args.prd,
+        prd_ref,
         &args.agent,
         args.model.as_deref(),
         args.parse_timeout,
