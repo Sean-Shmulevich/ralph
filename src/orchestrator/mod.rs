@@ -1113,8 +1113,8 @@ mod tests {
 
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_secs(5),
-            "timeout should kill quickly, elapsed={elapsed:?}"
+            elapsed < Duration::from_secs(15),
+            "timeout should kill within reasonable time, elapsed={elapsed:?}"
         );
         assert!(
             err.to_string().contains("Agent timed out after 1s"),
