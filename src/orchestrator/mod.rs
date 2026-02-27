@@ -245,6 +245,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 &args.agent,
                 args.model.as_deref(),
                 args.parse_timeout,
+                Some(&args.fallback_agents),
             )
             .await?;
             state.save_tasks(&tl)?;
@@ -277,7 +278,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     // Agent fallback: track per-task failures to try different agents on retry.
     // After the primary agent fails on a task, we try the next available fallback.
-    const FALLBACK_ORDER: &[&str] = &["codex", "gemini", "claude", "opencode"];
+
     let mut task_fail_count: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut active_agent: Box<dyn Agent> = agent;
     let mut active_agent_name: String = args.agent.clone();
@@ -644,24 +645,24 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 .or_insert(1);
 
             // Find the next fallback agent that isn't the current one and is available
-            for &candidate in FALLBACK_ORDER {
-                if candidate == active_agent_name {
+            for candidate_name in &args.fallback_agents {
+                if candidate_name == &active_agent_name {
                     continue;
                 }
-                if let Ok(new_agent) = create_agent(candidate, args.model.clone(), args.api_url.clone(), args.api_key.clone()) {
+                if let Ok(new_agent) = create_agent(candidate_name, args.model.clone(), args.api_url.clone(), args.api_key.clone()) {
                     if new_agent.is_available() {
                         let old_name = active_agent_name.clone();
                         active_agent = new_agent;
-                        active_agent_name = candidate.to_string();
+                        active_agent_name = candidate_name.clone();
                         if !is_watch_mode {
                             eprintln!(
                                 "    🔄  Falling back from {} → {} for task {}",
-                                old_name, candidate, task.id
+                                old_name, candidate_name, task.id
                             );
                         }
                         state.append_progress(&format!(
                             "Agent fallback: {} → {} for task {}",
-                            old_name, candidate, task.id
+                            old_name, candidate_name, task.id
                         ))?;
                         break;
                     }
@@ -1272,6 +1273,8 @@ fi
             stall_timeout: 5,
             parse_timeout: 5,
             max_failures,
+            retries_before_fallback: 2,
+            fallback_agents: vec!["gemini".to_string(), "claude".to_string(), "opencode".to_string()],
             workdir: Some(workdir.to_path_buf()),
             branch: None,
             no_branch: true,

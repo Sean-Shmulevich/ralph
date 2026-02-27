@@ -106,6 +106,16 @@ pub struct RunArgs {
     #[arg(long, default_value = "3")]
     pub max_failures: u32,
 
+    /// Number of same-agent retries (with exponential backoff) before falling back
+    /// to a different agent. Each retry waits 2^attempt seconds (2s, 4s, 8s, …).
+    #[arg(long, default_value = "2")]
+    pub retries_before_fallback: u32,
+
+    /// Comma-separated list of agents to use as fallback if the primary agent fails.
+    /// If not provided, defaults to all known agents except the primary agent (e.g., "gemini,claude,opencode" if primary is "codex").
+    #[arg(long, value_delimiter = ',', default_value = "gemini,claude,opencode")]
+    pub fallback_agents: Vec<String>,
+
     /// Project directory (defaults to current directory)
     #[arg(long)]
     pub workdir: Option<PathBuf>,
@@ -431,5 +441,28 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("--bogus"));
         assert!(rendered.to_ascii_lowercase().contains("usage"));
+    }
+
+    #[test]
+    fn run_subcommand_parses_fallback_agents() {
+        let cli = Cli::try_parse_from([
+            "ralph",
+            "run",
+            "prd.md",
+            "--agent",
+            "api",
+            "--fallback-agents",
+            "gemini,claude",
+        ])
+        .expect("parse should succeed");
+
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.prd, Some(PathBuf::from("prd.md")));
+                assert_eq!(args.agent, "api");
+                assert_eq!(args.fallback_agents, vec!["gemini".to_string(), "claude".to_string()]);
+            }
+            _ => panic!("expected run command"),
+        }
     }
 }

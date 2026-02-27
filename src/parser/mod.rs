@@ -44,6 +44,7 @@ pub async fn parse_prd(
     agent: &str,
     model: Option<&str>,
     parse_timeout_secs: u64,
+    fallback_agents_opt: Option<&[String]>,
 ) -> Result<TaskList> {
     let prd_content = std::fs::read_to_string(prd_path)
         .with_context(|| format!("Cannot read PRD file: {}", prd_path.display()))?;
@@ -52,7 +53,7 @@ pub async fn parse_prd(
 
     eprintln!("🔍  Parsing PRD with {} (this may take a moment)…", agent);
 
-    let raw = run_agent(agent, model, &prompt, parse_timeout_secs).await?;
+    let raw = run_agent(agent, model, &prompt, parse_timeout_secs, fallback_agents_opt).await?;
 
     // Extract the JSON array — the agent might wrap it in prose.
     let json_str = extract_json_array(&raw).with_context(|| {
@@ -86,6 +87,7 @@ pub async fn parse_and_print(args: ParseArgs) -> Result<()> {
         &args.agent,
         args.model.as_deref(),
         args.parse_timeout,
+        None, // No specific fallback agents provided for `ralph parse`
     )
     .await?;
 
@@ -118,15 +120,16 @@ pub async fn parse_and_print(args: ParseArgs) -> Result<()> {
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 /// Agent ordering for fallback: try the requested agent first, then others.
-/// Agent ordering for fallback. Codex is first because Claude's --print mode
-/// requires ANTHROPIC_API_KEY (OAuth-only installs fail silently).
-const FALLBACK_ORDER: &[&str] = &["codex", "gemini", "api", "claude", "opencode"];
+
+
+const DEFAULT_PARSE_FALLBACK_ORDER: &[&str] = &["codex", "gemini", "api", "claude", "opencode"];
 
 async fn run_agent(
     agent: &str,
     model: Option<&str>,
     prompt: &str,
     parse_timeout_secs: u64,
+    fallback_agents_opt: Option<&[String]>, // Renamed for clarity
 ) -> Result<String> {
     // Try the requested agent first
     match try_agent(agent, model, prompt, parse_timeout_secs).await {
@@ -137,19 +140,26 @@ async fn run_agent(
         }
     }
 
+    // Determine which fallback order to use
+    let fallbacks_to_try: Vec<&str> = if let Some(agents) = fallback_agents_opt {
+        agents.iter().map(|s| s.as_str()).collect()
+    } else {
+        DEFAULT_PARSE_FALLBACK_ORDER.to_vec()
+    };
+
     // Try fallback agents
-    for fallback in FALLBACK_ORDER {
-        if *fallback == agent {
-            continue; // already tried
+    for &fallback_agent_name in fallbacks_to_try.iter() { // Iterate over &str
+        if fallback_agent_name == agent {
+            continue; // primary agent is already tried or current agent is already tried as a fallback
         }
-        if !agent_on_path(fallback) {
+        if !agent_on_path(fallback_agent_name) {
             continue; // not installed
         }
-        eprintln!("🔄  Trying {} as fallback…", fallback);
-        match try_agent(fallback, model, prompt, parse_timeout_secs).await {
+        eprintln!("🔄  Trying {} as fallback…", fallback_agent_name);
+        match try_agent(fallback_agent_name, model, prompt, parse_timeout_secs).await {
             Ok(output) => return Ok(output),
             Err(e) => {
-                eprintln!("⚠️  {} also failed: {}", fallback, e);
+                eprintln!("⚠️  {} also failed: {}", fallback_agent_name, e);
             }
         }
     }
@@ -355,7 +365,7 @@ mod tests {
 
         let _path_guard = PathGuard::prepend(&bin_dir);
 
-        let task_list = parse_prd(&prd_path, "claude", None, 1)
+        let task_list = parse_prd(&prd_path, "claude", None, 1, None)
             .await
             .expect("fallback should parse");
 
@@ -392,7 +402,7 @@ mod tests {
 
         let _path_guard = PathGuard::prepend(&bin_dir);
 
-        let task_list = parse_prd(&prd_path, "claude", None, 5)
+        let task_list = parse_prd(&prd_path, "claude", None, 5, None)
             .await
             .expect("fallback should parse");
 
