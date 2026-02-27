@@ -604,7 +604,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
             Err(e) => {
                 if !is_watch_mode {
-                    eprintln!("    ❌  Iteration error: {e}");
+                    eprintln!("    ❌  Iteration error: {e:#}");
                 }
                 log_to_status(&args.loop_status, format!("❌ Iteration error: {e}"));
                 consecutive_failures += 1;

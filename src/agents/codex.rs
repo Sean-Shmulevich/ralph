@@ -1,17 +1,15 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Stdio;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use super::{Agent, AgentProcess};
 
 /// Codex (OpenAI) CLI agent backend.
 ///
-/// Invokes: `codex exec --full-auto "<prompt>"`
-///
-/// `--full-auto` is codex's convenience flag for sandboxed automatic execution
-/// with low-friction approvals — equivalent to the PRD's `--approval-mode full-auto`.
-/// An optional `--model MODEL` override is supported.
+/// Pipes the prompt via stdin to avoid hitting the OS ARG_MAX limit.
+/// Codex appends stdin to the `-p` flag content.
 pub struct CodexAgent {
     model: Option<String>,
 }
@@ -30,25 +28,27 @@ impl Agent for CodexAgent {
     fn spawn(&self, prompt: &str, workdir: &Path) -> Result<AgentProcess> {
         let mut cmd = Command::new("codex");
 
-        // `codex exec` is the non-interactive subcommand
-        cmd.arg("exec")
-            // auto-approve all actions, sandboxed to workspace writes
-            .arg("--full-auto");
+        cmd.arg("exec").arg("--full-auto");
 
         if let Some(ref model) = self.model {
             cmd.arg("--model").arg(model);
         }
 
-        // Prompt is a positional argument (after flags)
-        cmd.arg(prompt);
-
         cmd.current_dir(workdir)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .context("Failed to spawn codex — is it installed and on PATH?")?;
+
+        let prompt_bytes = prompt.as_bytes().to_vec();
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&prompt_bytes).await;
+            let _ = stdin.shutdown().await;
+        });
 
         Ok(AgentProcess { child })
     }

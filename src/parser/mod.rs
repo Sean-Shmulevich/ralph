@@ -179,14 +179,17 @@ fn agent_on_path(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn build_agent_command(agent: &str, model: Option<&str>, prompt: &str) -> Result<Command> {
+/// Build agent command. The prompt is written to a temp file and read via
+/// stdin to avoid hitting the OS ARG_MAX (E2BIG) limit on large PRDs.
+fn build_agent_command(agent: &str, model: Option<&str>, prompt: &str) -> Result<(Command, Vec<u8>)> {
+    let prompt_bytes = prompt.as_bytes().to_vec();
     let mut cmd = match agent {
         "claude" => {
             let mut c = Command::new("claude");
             c.arg("--dangerously-skip-permissions")
                 .arg("--print")
                 .arg("-p")
-                .arg(prompt);
+                .arg("-"); // read from stdin
             if let Some(m) = model {
                 c.arg("--model").arg(m);
             }
@@ -194,7 +197,7 @@ fn build_agent_command(agent: &str, model: Option<&str>, prompt: &str) -> Result
         }
         "gemini" => {
             let mut c = Command::new("gemini");
-            c.arg("-p").arg(prompt).arg("--yolo");
+            c.arg("-p").arg("").arg("--yolo");
             if let Some(m) = model {
                 c.arg("--model").arg(m);
             }
@@ -206,7 +209,6 @@ fn build_agent_command(agent: &str, model: Option<&str>, prompt: &str) -> Result
             if let Some(m) = model {
                 c.arg("--model").arg(m);
             }
-            c.arg(prompt);
             c
         }
         "opencode" => {
@@ -215,13 +217,12 @@ fn build_agent_command(agent: &str, model: Option<&str>, prompt: &str) -> Result
             if let Some(m) = model {
                 c.arg("--model").arg(m);
             }
-            c.arg(prompt);
             c
         }
         other => anyhow::bail!("Unknown agent for parsing: {}", other),
     };
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    Ok(cmd)
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    Ok((cmd, prompt_bytes))
 }
 
 async fn probe_claude_print_auth() -> Result<()> {
@@ -267,9 +268,18 @@ async fn try_agent(
         probe_claude_print_auth().await?;
     }
 
-    let mut cmd = build_agent_command(agent, model, prompt)?;
+    let (mut cmd, prompt_bytes) = build_agent_command(agent, model, prompt)?;
 
-    let output = match timeout(Duration::from_secs(parse_timeout_secs), cmd.output()).await {
+    let mut child = cmd.spawn().with_context(|| format!("Failed to spawn {} — is it installed?", agent))?;
+
+    // Write prompt to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(&prompt_bytes).await;
+        let _ = stdin.shutdown().await;
+    }
+
+    let output = match timeout(Duration::from_secs(parse_timeout_secs), child.wait_with_output()).await {
         Ok(result) => {
             result.with_context(|| format!("Failed to spawn {} — is it installed?", agent))?
         }
