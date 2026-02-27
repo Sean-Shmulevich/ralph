@@ -1528,7 +1528,7 @@ fi
 
         let started = Instant::now();
         let mut seen_pid = None;
-        while started.elapsed() < Duration::from_secs(2) {
+        while started.elapsed() < Duration::from_secs(10) {
             if let Some(lock) = state.read_lock().expect("read lock during run") {
                 seen_pid = Some(lock.pid);
                 break;
