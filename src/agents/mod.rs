@@ -31,6 +31,19 @@ pub trait Agent: Send + Sync {
     fn spawn(&self, prompt: &str, workdir: &Path) -> Result<AgentProcess>;
 }
 
+/// Check if an agent binary is reachable by trying to run it directly.
+/// This avoids shelling out to `which` (which may not be on PATH itself,
+/// or may see a different PATH than the current process).
+pub fn check_binary_available(name: &str) -> bool {
+    std::process::Command::new(name)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Build the concrete agent implementation for the given name.
 pub fn create_agent(
     name: &str,

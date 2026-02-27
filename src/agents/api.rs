@@ -46,13 +46,7 @@ impl ApiAgent {
 impl Agent for ApiAgent {
     fn is_available(&self) -> bool {
         // curl is available on basically every system
-        std::process::Command::new("which")
-            .arg("curl")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        super::check_binary_available("curl")
     }
 
     fn spawn(&self, prompt: &str, workdir: &Path) -> Result<AgentProcess> {

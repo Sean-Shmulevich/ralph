@@ -21,13 +21,7 @@ impl ClaudeAgent {
 
 impl Agent for ClaudeAgent {
     fn is_available(&self) -> bool {
-        std::process::Command::new("which")
-            .arg("claude")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        super::check_binary_available("claude")
     }
 
     fn spawn(&self, prompt: &str, workdir: &Path) -> Result<AgentProcess> {

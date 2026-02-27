@@ -170,8 +170,8 @@ fn agent_on_path(name: &str) -> bool {
         "opencode" => "opencode",
         _ => return false,
     };
-    std::process::Command::new("which")
-        .arg(bin)
+    std::process::Command::new(bin)
+        .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()

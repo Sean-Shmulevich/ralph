@@ -366,8 +366,8 @@ async fn run_doctor(args: cli::DoctorArgs) -> Result<()> {
 }
 
 fn command_on_path(bin: &str) -> bool {
-    StdCommand::new("which")
-        .arg(bin)
+    StdCommand::new(bin)
+        .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
