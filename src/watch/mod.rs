@@ -240,6 +240,8 @@ fn build_run_args(
         stall_timeout: watch_args.stall_timeout,
         parse_timeout: 120,
         max_failures: watch_args.max_failures,
+        retries_before_fallback: 2,
+        fallback_agents: vec!["gemini".to_string(), "claude".to_string(), "opencode".to_string()],
         workdir: Some(workdir.to_path_buf()),
         // Git branching is disabled for parallel watch mode (avoids concurrent conflicts).
         // Users who need branching should use `ralph run` per PRD.
