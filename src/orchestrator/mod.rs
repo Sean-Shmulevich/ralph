@@ -41,6 +41,10 @@ const ITERATION_PROMPT: &str = r#"You are an expert software engineer. Your miss
 
 {progress}
 
+## Checkpoint (Previous Attempt)
+
+{previous_attempt_context}
+
 ## Instructions
 
 1. Implement **"{task_title}"** as described above.
@@ -468,6 +472,23 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
         match iter_result {
             Ok(stdout) => {
+                // T5: Detect rate limits and retry automatically
+                if let Some(delay) = crate::rate_limit::detect_rate_limit(&stdout) {
+                    if !is_watch_mode {
+                        eprintln!("    ⏳  Rate limit detected — retrying in {:?}...", delay);
+                    }
+                    log_to_status(&args.loop_status, format!("⏳ Rate limit detected — retrying in {:?}...", delay));
+                    state.append_progress(&format!(
+                        "Continuing after rate limit delay for task {}: {}",
+                        task.id,
+                        stdout.lines().next().unwrap_or("Error details unavailable")
+                    ))?;
+                    tokio::time::sleep(delay).await;
+                    set_task_status(&mut task_list, &task.id, crate::state::TaskStatus::Pending);
+                    task_list.updated_at = chrono::Utc::now();
+                    state.save_tasks(&task_list)?;
+                    continue;
+                }
                 let promised_complete = stdout.contains("<promise>COMPLETE</promise>");
 
                 // Check if the agent directly edited tasks.json
@@ -639,32 +660,57 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
         // ── Agent fallback: swap to a different agent after a failure ──────────
         if consecutive_failures > 0 {
-            task_fail_count
-                .entry(task.id.clone())
-                .and_modify(|c| *c += 1)
-                .or_insert(1);
-
-            // Find the next fallback agent that isn't the current one and is available
-            for candidate_name in &args.fallback_agents {
-                if candidate_name == &active_agent_name {
-                    continue;
+            // T1: Same-agent retry with exponential backoff
+            if consecutive_failures <= args.retries_before_fallback {
+                let delay = 2u64.pow(consecutive_failures);
+                if !is_watch_mode {
+                    eprintln!(
+                        "    ⏳  Retrying same agent ({}) in {}s... (attempt {}/{})",
+                        active_agent_name,
+                        delay,
+                        consecutive_failures,
+                        args.retries_before_fallback
+                    );
                 }
-                if let Ok(new_agent) = create_agent(candidate_name, args.model.clone(), args.api_url.clone(), args.api_key.clone()) {
-                    if new_agent.is_available() {
-                        let old_name = active_agent_name.clone();
-                        active_agent = new_agent;
-                        active_agent_name = candidate_name.clone();
-                        if !is_watch_mode {
-                            eprintln!(
-                                "    🔄  Falling back from {} → {} for task {}",
+                state.append_progress(&format!(
+                    "Retrying same agent ({}) in {}s... (attempt {}/{})",
+                    active_agent_name, delay, consecutive_failures, args.retries_before_fallback
+                ))?;
+
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            } else {
+                task_fail_count
+                    .entry(task.id.clone())
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
+
+                // Find the next fallback agent that isn't the current one and is available
+                for candidate_name in &args.fallback_agents {
+                    if candidate_name == &active_agent_name {
+                        continue;
+                    }
+                    if let Ok(new_agent) = create_agent(
+                        candidate_name,
+                        args.model.clone(),
+                        args.api_url.clone(),
+                        args.api_key.clone(),
+                    ) {
+                        if new_agent.is_available() {
+                            let old_name = active_agent_name.clone();
+                            active_agent = new_agent;
+                            active_agent_name = candidate_name.clone();
+                            if !is_watch_mode {
+                                eprintln!(
+                                    "    🔄  Falling back from {} → {} for task {}",
+                                    old_name, candidate_name, task.id
+                                );
+                            }
+                            state.append_progress(&format!(
+                                "Agent fallback: {} → {} for task {}",
                                 old_name, candidate_name, task.id
-                            );
+                            ))?;
+                            break;
                         }
-                        state.append_progress(&format!(
-                            "Agent fallback: {} → {} for task {}",
-                            old_name, candidate_name, task.id
-                        ))?;
-                        break;
                     }
                 }
             }
@@ -784,8 +830,13 @@ async fn run_iteration(
         .context("Agent stderr pipe missing")?;
 
     // ── Start background watcher ──────────────────────────────────────────────
-    let watcher_config = WatcherConfig::new(workdir.to_path_buf())
+    let mut watcher_config = WatcherConfig::new(workdir.to_path_buf())
         .with_stall_timeout(Duration::from_secs(stall_timeout_secs));
+
+    if let Some(pid) = proc.child.id() {
+        watcher_config = watcher_config.with_agent_pid(pid);
+    }
+
     let (watcher_handle, mut event_rx, last_output_ts) = start_watcher(watcher_config);
 
     // ── Read stdout and stderr concurrently, updating stall timestamp ─────────
@@ -914,7 +965,7 @@ async fn run_iteration(
         );
     }
 
-    Ok(stdout_str)
+            Ok(stdout_str)
 }
 
 // ── Task scheduling ───────────────────────────────────────────────────────────

@@ -57,6 +57,9 @@ pub struct WatcherConfig {
 
     /// Project working directory — used for git checks and disk-space queries.
     pub workdir: PathBuf,
+
+    /// PID of the agent process to monitor CPU usage for.
+    pub agent_pid: Option<u32>,
 }
 
 impl WatcherConfig {
@@ -67,12 +70,19 @@ impl WatcherConfig {
             stall_timeout: Duration::from_secs(120),
             disk_warn_threshold: 1024 * 1024 * 1024, // 1 GiB
             workdir,
+            agent_pid: None,
         }
     }
 
     /// Override the stall timeout.
     pub fn with_stall_timeout(mut self, d: Duration) -> Self {
         self.stall_timeout = d;
+        self
+    }
+
+    /// Set the agent PID to monitor.
+    pub fn with_agent_pid(mut self, pid: u32) -> Self {
+        self.agent_pid = Some(pid);
         self
     }
 }
@@ -140,6 +150,10 @@ async fn run_watcher(
     // Track whether we already fired a stall event for the current stall window.
     let mut stall_fired = false;
 
+    // State for smarter stall detection
+    let mut prev_cpu_times = ProcCpuTimes::default();
+    let mut prev_workdir_mtime: Option<SystemTime> = None;
+
     loop {
         tokio::select! {
             biased;
@@ -150,12 +164,64 @@ async fn run_watcher(
             }
 
             _ = ticker.tick() => {
-                // ── Stall check ───────────────────────────────────────────────
+                let mut cpu_active = false;
+                let mut current_cpu_total = 0; // Initialize for logging
+                if let Some(pid) = config.agent_pid {
+                    match ProcCpuTimes::from_pid(pid).await {
+                        Ok(current_cpu_times) => {
+                            current_cpu_total = current_cpu_times.total();
+                            if current_cpu_total > prev_cpu_times.total() {
+                                cpu_active = true;
+                            }
+                            prev_cpu_times = current_cpu_times;
+                        },
+                        Err(_e) => {
+                            // Agent process might have died or /proc/<pid>/stat is gone.
+                            // For now, just log and treat as not active.
+                            // eprintln!("Error reading CPU times for pid {}: {}", pid, _e);
+                        }
+                    }
+                }
+
+                let mut fs_active = false;
+                match tokio::fs::metadata(&config.workdir).await {
+                    Ok(metadata) => {
+                        if let Ok(current_mtime) = metadata.modified() {
+                            if let Some(prev_mtime) = prev_workdir_mtime {
+                                if current_mtime > prev_mtime {
+                                    fs_active = true;
+                                }
+                            }
+                            prev_workdir_mtime = Some(current_mtime);
+                        }
+                    },
+                    Err(_) => {
+                        // Workdir might have been deleted or permissions changed.
+                        // For now, just log and treat as not active.
+                    }
+                }
+
                 let last_ts = last_output_ts.load(Ordering::Relaxed);
                 let now = unix_now_secs();
                 let silent_secs = now.saturating_sub(last_ts);
 
-                if silent_secs >= config.stall_timeout.as_secs() {
+                let mut effective_stall_timeout_secs = config.stall_timeout.as_secs();
+                if cpu_active || fs_active {
+                    effective_stall_timeout_secs *= 2;
+                }
+
+                eprintln!(
+                    "Watcher tick: cpu_active={}, fs_active={}, silent_secs={}, effective_stall_timeout_secs={}, current_cpu_total={}, prev_cpu_total={}",
+                    cpu_active,
+                    fs_active,
+                    silent_secs,
+                    effective_stall_timeout_secs,
+                    current_cpu_total,
+                    prev_cpu_times.total()
+                );
+
+                // ── Stall check ───────────────────────────────────────────────
+                if silent_secs >= effective_stall_timeout_secs {
                     if !stall_fired {
                         stall_fired = true;
                         let _ = event_tx
@@ -252,6 +318,37 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
+use std::time::SystemTime;
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ProcCpuTimes {
+    utime: u64,
+    stime: u64,
+}
+
+impl ProcCpuTimes {
+    /// Read and parse /proc/<pid>/stat for utime and stime.
+    /// Returns 0 for utime/stime if the file cannot be read (e.g. process died).
+    async fn from_pid(pid: u32) -> Result<Self> {
+        let path = format!("/proc/{}/stat", pid);
+        let content = tokio::fs::read_to_string(&path).await?;
+        let parts: Vec<&str> = content.split_whitespace().collect();
+
+        if parts.len() < 15 {
+            anyhow::bail!("Failed to parse /proc/{}/stat: not enough fields", pid);
+        }
+
+        let utime = parts[13].parse::<u64>()?; // utime is 14th field (index 13)
+        let stime = parts[14].parse::<u64>()?; // stime is 15th field (index 14)
+
+        Ok(Self { utime, stime })
+    }
+
+    fn total(&self) -> u64 {
+        self.utime + self.stime
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +357,7 @@ mod tests {
     use std::process::Command as StdCommand;
     use tempfile::tempdir;
     use tokio::time::timeout;
+    use tokio::process::Command;
 
     fn unix_now_secs_for_test() -> u64 {
         std::time::SystemTime::now()
@@ -298,6 +396,7 @@ mod tests {
             stall_timeout: Duration::from_secs(1),
             disk_warn_threshold: 0,
             workdir: dir.path().to_path_buf(),
+            agent_pid: None,
         };
 
         let (_handle, mut event_rx, last_output_ts) = start_watcher(config);
@@ -333,6 +432,7 @@ mod tests {
             // should fire on the first successful `df` check without env mocking.
             disk_warn_threshold: u64::MAX,
             workdir: dir.path().to_path_buf(),
+            agent_pid: None,
         };
 
         let (_handle, mut event_rx, _last_output_ts) = start_watcher(config);
@@ -392,6 +492,7 @@ mod tests {
             stall_timeout: Duration::from_secs(3600),
             disk_warn_threshold: 0,
             workdir: dir.path().to_path_buf(),
+            agent_pid: None,
         };
 
         let (_handle, mut event_rx, _last_output_ts) = start_watcher(config);
@@ -414,6 +515,7 @@ mod tests {
             stall_timeout: Duration::from_secs(3600),
             disk_warn_threshold: 0,
             workdir: dir.path().to_path_buf(),
+            agent_pid: None,
         };
 
         let (handle, mut event_rx, _last_output_ts) = start_watcher(config);
@@ -423,5 +525,15 @@ mod tests {
             .await
             .expect("watcher should terminate and close channel");
         assert!(recv.is_none(), "event channel should close after shutdown");
+    }
+}
+#[cfg(test)]
+mod proccputimes_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_proccputimes_from_pid_invalid() {
+        let res = ProcCpuTimes::from_pid(999999999).await;
+        assert!(res.is_err());
     }
 }
